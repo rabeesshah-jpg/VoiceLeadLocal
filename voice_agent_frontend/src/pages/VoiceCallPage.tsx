@@ -2,19 +2,27 @@ import { useCallback, useEffect, useState } from 'react';
 import { LiveKitRoom, RoomAudioRenderer } from '@livekit/components-react';
 import { endCall, getHealth, startCall, type StartCallResponse } from '../api/calls';
 import { log, logError } from '../lib/logger';
-import CallControls from '../components/CallControls';
-import ConnectionBadge from '../components/ConnectionBadge';
 import TranscriptPanel from '../components/TranscriptPanel';
 import AudioVisualizer from '../components/AudioVisualizer';
 import RoomDataBinder from '../components/RoomDataBinder';
 import MuteSync from '../components/MuteSync';
+import PageHeader from '../components/PageHeader';
+import IntroSection from '../components/IntroSection';
+import ChatHeader from '../components/ChatHeader';
+import ChatEmptyState from '../components/ChatEmptyState';
+import ChatInputBar from '../components/ChatInputBar';
+import PageFooter from '../components/PageFooter';
+import LatencyPanel from '../components/LatencyPanel';
 import { useAgentDataChannel } from '../hooks/useAgentDataChannel';
+
+const VOICE_PROMPT = 'Start a voice conversation';
 
 export default function VoiceCallPage() {
   const [session, setSession] = useState<StartCallResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [muted, setMuted] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
+  const [inputValue, setInputValue] = useState('');
   const { state: transcriptState, bindRoom, reset } = useAgentDataChannel();
 
   useEffect(() => {
@@ -74,32 +82,88 @@ export default function VoiceCallPage() {
       ? 'error'
       : 'live';
 
+  const hasMessages =
+    transcriptState.userLines.length > 0 ||
+    transcriptState.agentLines.length > 0 ||
+    Boolean(transcriptState.pendingUser) ||
+    Boolean(transcriptState.pendingAgent);
+
+  const showEmptyState = !hasMessages && !inCall;
+
+  const handleCallAction = useCallback(() => {
+    if (inCall) {
+      void handleEnd();
+    } else {
+      void handleStart();
+    }
+  }, [inCall, handleEnd, handleStart]);
+
+  const handleSelectPrompt = useCallback(
+    (text: string) => {
+      if (text === VOICE_PROMPT) {
+        void handleStart();
+        return;
+      }
+      setInputValue(text);
+    },
+    [handleStart],
+  );
+
+  const handleSend = useCallback(() => {
+    if (!inputValue.trim()) return;
+    setInputValue('');
+  }, [inputValue]);
+
+  const displayError = apiError || transcriptState.lastError;
+
   return (
-    <>
-      <h1>Voice Agent</h1>
-      <p className="subtitle">
-        LiveKit transport · server-side Deepgram · OpenRouter · Cartesia
-      </p>
+    <div className="page">
+      <PageHeader />
+      <IntroSection />
 
-      {(apiError || transcriptState.lastError) && (
-        <div className="error-banner">{apiError || transcriptState.lastError}</div>
-      )}
-
-      <div className="panel">
-        <ConnectionBadge
+      <section className="chat-card" aria-label="Assistant chat">
+        <ChatHeader
           connection={connectionState as 'idle' | 'live' | 'error'}
           agentState={transcriptState.agentState}
+          inCall={inCall}
+          muted={muted}
+          onToggleMute={() => setMuted((m) => !m)}
         />
-      </div>
 
-      <CallControls
-        inCall={inCall}
-        muted={muted}
-        busy={busy}
-        onStart={handleStart}
-        onEnd={handleEnd}
-        onToggleMute={() => setMuted((m) => !m)}
-      />
+        {displayError && (
+          <div className="error-banner" role="alert">
+            {displayError}
+          </div>
+        )}
+
+        <div className="chat-body">
+          {showEmptyState ? (
+            <ChatEmptyState onSelectPrompt={handleSelectPrompt} />
+          ) : (
+            <>
+              {hasMessages && <TranscriptPanel state={transcriptState} />}
+              {inCall && <AudioVisualizer agentState={transcriptState.agentState} />}
+              {!hasMessages && inCall && (
+                <p className="chat-body-hint">Voice call active — speak to begin.</p>
+              )}
+            </>
+          )}
+        </div>
+
+        <div className="chat-footer-input">
+          <ChatInputBar
+            value={inputValue}
+            onChange={setInputValue}
+            onSend={handleSend}
+            onCall={handleCallAction}
+            inCall={inCall}
+            busy={busy}
+          />
+          <p className="chat-powered-by">Powered by Voice Agent</p>
+        </div>
+      </section>
+
+      {inCall && <LatencyPanel metrics={transcriptState.turnMetrics} />}
 
       {session && (
         <LiveKitRoom
@@ -124,8 +188,7 @@ export default function VoiceCallPage() {
         </LiveKitRoom>
       )}
 
-      <AudioVisualizer agentState={transcriptState.agentState} />
-      <TranscriptPanel state={transcriptState} />
-    </>
+      <PageFooter />
+    </div>
   );
 }

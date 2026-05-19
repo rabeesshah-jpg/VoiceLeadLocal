@@ -2,6 +2,20 @@ import { useCallback, useRef, useState } from 'react';
 import type { Room } from 'livekit-client';
 import { RoomEvent } from 'livekit-client';
 import { log } from '../lib/logger';
+import {
+  applyLlmMilestone,
+  applyTtsMilestone,
+  applyTurnSummaryLatency,
+  finalizeWaitingMilestones,
+  getTelemetryEventKind,
+  initialTurnLatencyMetrics,
+  isLlmMilestoneEvent,
+  isTtsMilestoneEvent,
+  startNewTurnMetrics,
+  type TurnLatencyMetrics,
+} from '../lib/latencyEvents';
+
+export type { MilestoneStatus, TurnLatencyMetrics } from '../lib/latencyEvents';
 
 export type AgentUiState =
   | 'idle'
@@ -12,7 +26,8 @@ export type AgentUiState =
   | 'initializing';
 
 export interface AgentDataMessage {
-  type: string;
+  type?: string;
+  event?: string;
   state?: AgentUiState;
   text?: string;
   is_final?: boolean;
@@ -21,7 +36,12 @@ export interface AgentDataMessage {
   stt_ms?: number;
   llm_first_token_ms?: number;
   tts_first_byte_ms?: number;
+  tts_first_chunk_ms?: number;
+  duration_ms?: number;
+  ts?: number;
   turn_id?: string;
+  component?: string;
+  metric?: string;
 }
 
 export interface TranscriptState {
@@ -32,6 +52,7 @@ export interface TranscriptState {
   agentState: AgentUiState;
   lastLatency: AgentDataMessage | null;
   lastError: string | null;
+  turnMetrics: TurnLatencyMetrics;
 }
 
 const initial: TranscriptState = {
@@ -42,6 +63,7 @@ const initial: TranscriptState = {
   agentState: 'idle',
   lastLatency: null,
   lastError: null,
+  turnMetrics: initialTurnLatencyMetrics,
 };
 
 function normalizeText(s: string): string {
@@ -78,12 +100,20 @@ export function useAgentDataChannel() {
         }
       }
 
+      const kind = getTelemetryEventKind(msg);
+
       setState((prev) => {
         const next = { ...prev };
-        switch (msg.type) {
+        switch (kind) {
           case 'agent_state':
             if (msg.state) {
               next.agentState = msg.state;
+              if (
+                msg.state === 'listening' &&
+                prev.turnMetrics.turnActive
+              ) {
+                next.turnMetrics = finalizeWaitingMilestones(prev.turnMetrics);
+              }
             }
             break;
           case 'user_transcript':
@@ -94,6 +124,9 @@ export function useAgentDataChannel() {
                 lastUserFinalRef.current = norm;
                 next.userLines = [...prev.userLines, msg.text.trim()];
                 next.pendingUser = '';
+                if (norm) {
+                  next.turnMetrics = startNewTurnMetrics(prev.turnMetrics);
+                }
               }
             } else {
               next.pendingUser = msg.text;
@@ -113,12 +146,19 @@ export function useAgentDataChannel() {
             }
             break;
           case 'latency':
+          case 'voice_turn_latency_summary':
             next.lastLatency = msg;
+            next.turnMetrics = applyTurnSummaryLatency(prev.turnMetrics, msg);
             break;
           case 'error':
             next.lastError = msg.message || msg.code || 'Unknown error';
             break;
           default:
+            if (isLlmMilestoneEvent(kind, msg)) {
+              next.turnMetrics = applyLlmMilestone(prev.turnMetrics, msg);
+            } else if (isTtsMilestoneEvent(kind, msg)) {
+              next.turnMetrics = applyTtsMilestone(prev.turnMetrics, msg);
+            }
             break;
         }
         return next;

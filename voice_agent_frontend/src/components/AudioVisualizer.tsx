@@ -5,27 +5,19 @@ interface Props {
 /** Simple state indicator (no raw audio processing on client). */
 export default function AudioVisualizer({ agentState }: Props) {
   const active = agentState === 'speaking' || agentState === 'listening';
+  const statusText =
+    agentState === 'speaking'
+      ? 'Agent speaking — speak to interrupt'
+      : agentState === 'listening'
+        ? 'Listening…'
+        : agentState === 'thinking'
+          ? 'Thinking…'
+          : 'Waiting';
+
   return (
-    <div className="panel" aria-hidden>
-      <div
-        style={{
-          height: 8,
-          borderRadius: 4,
-          background: active
-            ? 'linear-gradient(90deg, #8ab4f8, #81c995)'
-            : '#2a2f3a',
-          transition: 'background 0.2s',
-        }}
-      />
-      <p className="latency" style={{ marginTop: '0.5rem', marginBottom: 0 }}>
-        {agentState === 'speaking'
-          ? 'Agent speaking — speak to interrupt'
-          : agentState === 'listening'
-            ? 'Listening…'
-            : agentState === 'thinking'
-              ? 'Thinking…'
-              : 'Waiting'}
-      </p>
+    <div className="chat-activity" aria-hidden>
+      <div className={`chat-activity-bar ${active ? 'chat-activity-bar--active' : ''}`} />
+      <p className="chat-activity-label">{statusText}</p>
     </div>
   );
 }

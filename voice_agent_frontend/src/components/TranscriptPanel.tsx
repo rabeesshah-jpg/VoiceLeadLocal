@@ -19,38 +19,17 @@ export default function TranscriptPanel({ state }: Props) {
   ];
 
   return (
-    <div className="panel transcript">
-      <div>
-        <span className="label">You: </span>
-        {userDisplay.length === 0 ? (
-          <span style={{ color: '#9aa0a6' }}>—</span>
-        ) : (
-          userDisplay.map((line, i) => (
-            <p key={`u-${i}`} style={{ margin: '0.25rem 0' }}>
-              {line}
-            </p>
-          ))
-        )}
-      </div>
-      <div style={{ marginTop: '1rem' }}>
-        <span className="label agent">Agent: </span>
-        {agentDisplay.length === 0 ? (
-          <span style={{ color: '#9aa0a6' }}>—</span>
-        ) : (
-          agentDisplay.map((line, i) => (
-            <p key={`a-${i}`} className="agent" style={{ margin: '0.25rem 0' }}>
-              {line}
-            </p>
-          ))
-        )}
-      </div>
-      {state.lastLatency && (
-        <p className="latency" style={{ marginTop: '1rem' }}>
-          Latency — STT: {state.lastLatency.stt_ms ?? '—'}ms · LLM:{' '}
-          {state.lastLatency.llm_first_token_ms ?? '—'}ms · TTS:{' '}
-          {state.lastLatency.tts_first_byte_ms ?? '—'}ms
-        </p>
-      )}
+    <div className="chat-messages">
+      {userDisplay.map((line, i) => (
+        <div key={`u-${i}`} className="chat-bubble chat-bubble--user">
+          {line}
+        </div>
+      ))}
+      {agentDisplay.map((line, i) => (
+        <div key={`a-${i}`} className="chat-bubble chat-bubble--agent">
+          {line}
+        </div>
+      ))}
     </div>
   );
 }
