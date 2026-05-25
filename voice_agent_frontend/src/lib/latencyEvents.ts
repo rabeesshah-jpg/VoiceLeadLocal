@@ -8,7 +8,10 @@ export interface TelemetryPayload {
   stt_ms?: number;
   llm_first_token_ms?: number;
   tts_first_byte_ms?: number;
+  tts_ttfb_ms?: number;
   tts_first_chunk_ms?: number;
+  tts_total_ms?: number;
+  tts_call_count?: number;
   component?: string;
   metric?: string;
 }
@@ -24,6 +27,8 @@ export interface TurnLatencyMetrics {
   ttsFirstChunkAt: number | null;
   ttsFirstChunkMs: number | null;
   ttsStatus: MilestoneStatus;
+  ttsTotalMs: number | null;
+  ttsCallCount: number | null;
 }
 
 export const initialTurnLatencyMetrics: TurnLatencyMetrics = {
@@ -35,6 +40,8 @@ export const initialTurnLatencyMetrics: TurnLatencyMetrics = {
   ttsFirstChunkAt: null,
   ttsFirstChunkMs: null,
   ttsStatus: 'idle',
+  ttsTotalMs: null,
+  ttsCallCount: null,
 };
 
 const LLM_MILESTONE_EVENTS = new Set([
@@ -91,6 +98,8 @@ export function startNewTurnMetrics(_prev?: TurnLatencyMetrics): TurnLatencyMetr
     ttsFirstChunkAt: null,
     ttsFirstChunkMs: null,
     ttsStatus: 'waiting',
+    ttsTotalMs: null,
+    ttsCallCount: null,
   };
 }
 
@@ -113,7 +122,12 @@ export function applyTtsMilestone(
   metrics: TurnLatencyMetrics,
   msg: TelemetryPayload,
 ): TurnLatencyMetrics {
-  const ms = readMs(msg.duration_ms, msg.tts_first_byte_ms, msg.tts_first_chunk_ms);
+  const ms = readMs(
+    msg.duration_ms,
+    msg.tts_ttfb_ms,
+    msg.tts_first_byte_ms,
+    msg.tts_first_chunk_ms,
+  );
   if (ms === null) return metrics;
   return {
     ...metrics,
@@ -149,7 +163,7 @@ export function applyTurnSummaryLatency(
     next.llmStatus = 'received';
   }
 
-  const ttsMs = readMs(msg.tts_first_byte_ms, msg.tts_first_chunk_ms);
+  const ttsMs = readMs(msg.tts_ttfb_ms, msg.tts_first_byte_ms, msg.tts_first_chunk_ms);
   if (next.ttsStatus === 'waiting') {
     if (ttsMs !== null) {
       next.ttsFirstChunkMs = ttsMs;
@@ -162,6 +176,14 @@ export function applyTurnSummaryLatency(
     next.ttsFirstChunkMs = ttsMs;
     next.ttsFirstChunkAt = readTs(msg);
     next.ttsStatus = 'received';
+  }
+
+  const ttsTotal = readMs(msg.tts_total_ms);
+  if (ttsTotal !== null) {
+    next.ttsTotalMs = ttsTotal;
+  }
+  if (typeof msg.tts_call_count === 'number' && Number.isFinite(msg.tts_call_count)) {
+    next.ttsCallCount = msg.tts_call_count;
   }
 
   return next;

@@ -90,17 +90,23 @@ DEEPGRAM_API_KEY = env("DEEPGRAM_API_KEY", default="")
 OPENROUTER_API_KEY = env("OPENROUTER_API_KEY", default="")
 OPENROUTER_BASE_URL = env("OPENROUTER_BASE_URL", default="https://openrouter.ai/api/v1")
 VOICE_AGENT_LLM_MODEL = env("VOICE_AGENT_LLM_MODEL", default="openai/gpt-4o-mini")
-CARTESIA_API_KEY = env("CARTESIA_API_KEY", default="")
-VOICE_AGENT_CARTESIA_VOICE_ID = env(
-    "VOICE_AGENT_CARTESIA_VOICE_ID",
-    default="0ad65e7f-006c-47cf-bd31-52279d487913",
-)
-VOICE_AGENT_SYSTEM_PROMPT = env(
-    "VOICE_AGENT_SYSTEM_PROMPT",
-    default="You are a helpful voice assistant. Keep replies concise and conversational.",
-)
+# TTS: supertonic (POST /v1/tts) or multilingual (POST /tts_to_audio/)
+TTS_PROVIDER = env("TTS_PROVIDER", default="supertonic")
+TTS_BASE_URL = env("TTS_BASE_URL", default="http://172.16.2.158:7788")
+TTS_MODEL = env("TTS_MODEL", default="multilingual")
+TTS_VOICE = env("TTS_VOICE", default="M1")
+TTS_LANG = env("TTS_LANG", default="en")
+TTS_MAX_CHUNK_LENGTH = env.int("TTS_MAX_CHUNK_LENGTH", default=300)
+
+# Legacy Chatterbox multilingual (RunPod) — deprecated, kept for env migration only:
+CHATTERBOX_TTS_URL = env("CHATTERBOX_TTS_URL", default="")
+VOICE_AGENT_CHATTERBOX_VOICE_ID = env("VOICE_AGENT_CHATTERBOX_VOICE_ID", default="")
+# VOICE_AGENT_CHATTERBOX_OUTPUT_FORMAT = wav
+# VOICE_AGENT_CHATTERBOX_CHUNK_SIZE — text chars on Chatterbox server, not HTTP bytes
+# VOICE_AGENT_CHATTERBOX_SPLIT_TEXT / STREAM — Chatterbox-only streaming API
 VOICE_AGENT_NAME = env("VOICE_AGENT_NAME", default="voice-agent")
 VOICE_AGENT_SKIP_ROOM_SETUP = env.bool("VOICE_AGENT_SKIP_ROOM_SETUP", default=False)
+VOICE_AGENT_SKIP_TTS_WARMUP = env.bool("VOICE_AGENT_SKIP_TTS_WARMUP", default=False)
 
 # File logging is configured in apps.calls.apps.CallsConfig.ready() via config.logging_setup.
 # Logs are cleared on each API/worker process start:

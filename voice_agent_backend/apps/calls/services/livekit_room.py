@@ -29,6 +29,8 @@ async def _ensure_room_and_dispatch_async(
     room_name: str,
     call_id: str,
     system_prompt: str,
+    persona_id: str = "",
+    language: str = "en",
 ) -> dict:
     from livekit import api
     from livekit.protocol.agent_dispatch import CreateAgentDispatchRequest
@@ -37,10 +39,16 @@ async def _ensure_room_and_dispatch_async(
     agent_name = getattr(settings, "VOICE_AGENT_NAME", None) or os.environ.get(
         "VOICE_AGENT_NAME", "voice-agent"
     )
+    from agent.pipeline.voice_presets import resolve_tts_config
+
+    tts_config = resolve_tts_config(persona_id, language=language)
     metadata = json.dumps(
         {
             "call_id": call_id,
             "system_prompt": (system_prompt or "")[:2000],
+            "persona_id": persona_id or "",
+            "language": language,
+            "tts": tts_config,
         }
     )
 
@@ -140,6 +148,8 @@ def ensure_room_and_dispatch_agent(
     room_name: str,
     call_id: str,
     system_prompt: str = "",
+    persona_id: str = "",
+    language: str = "en",
 ) -> dict:
     """Sync wrapper for Django views."""
     try:
@@ -148,6 +158,8 @@ def ensure_room_and_dispatch_agent(
                 room_name=room_name,
                 call_id=call_id,
                 system_prompt=system_prompt,
+                persona_id=persona_id,
+                language=language,
             )
         )
     except Exception as exc:

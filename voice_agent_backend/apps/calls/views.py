@@ -14,6 +14,8 @@ from apps.calls.serializers import (
     StartCallSerializer,
 )
 from apps.calls.services import LiveKitTokenService, SessionRegistry
+from agent.prompts import get_voice_agent_instructions, normalize_language
+from apps.calls.services.supertonic_warmup import run_supertonic_handshake
 from apps.calls.services.livekit_room import ensure_room_and_dispatch_agent
 from config.step_log import StepTimer, log_block
 
@@ -71,7 +73,9 @@ class StartCallView(APIView):
             serializer.is_valid(raise_exception=True)
 
         persona_id = serializer.validated_data.get("persona_id", "")
+        language = normalize_language(serializer.validated_data.get("language", "en"))
         system_prompt = serializer.validated_data.get("system_prompt", "")
+        instructions = system_prompt.strip() or get_voice_agent_instructions(language)
 
         lk_service = LiveKitTokenService()
         with StepTimer(logger, operation, "livekit_config", request_id=request_id):
@@ -111,13 +115,35 @@ class StartCallView(APIView):
         with StepTimer(
             logger,
             operation,
+            "supertonic_handshake",
+            request_id=request_id,
+            persona_id=persona_id or "default",
+        ):
+            handshake = run_supertonic_handshake(
+                persona_id=persona_id, language=language, force=True
+            )
+            if not handshake.get("ok") and not handshake.get("skipped"):
+                log_block(
+                    logger,
+                    logging.WARNING,
+                    operation=operation,
+                    step="supertonic_handshake",
+                    status="FAIL",
+                    request_id=request_id,
+                    detail=handshake,
+                )
+
+        with StepTimer(
+            logger,
+            operation,
             "create_session",
             request_id=request_id,
             persona_id=persona_id or "default",
         ):
             session = SessionRegistry.create_session(
                 persona_id=persona_id,
-                system_prompt=system_prompt,
+                system_prompt=instructions,
+                language=language,
             )
 
         if not getattr(settings, "VOICE_AGENT_SKIP_ROOM_SETUP", False):
@@ -134,6 +160,8 @@ class StartCallView(APIView):
                         room_name=session.room_name,
                         call_id=str(session.id),
                         system_prompt=session.system_prompt,
+                        persona_id=persona_id or session.persona_id,
+                        language=language,
                     )
                     log_block(
                         logger,
@@ -212,6 +240,7 @@ class StartCallView(APIView):
             request_id=request_id,
             call_id=str(session.id),
             room=session.room_name,
+            language=language,
             identity=participant.identity,
             livekit_url=participant.livekit_url,
             expires_at=participant.expires_at.isoformat(),
@@ -295,9 +324,17 @@ def _aggregate_latency_metrics(session: CallSession) -> dict:
         vals = [s.get(key) for s in samples if s.get(key) is not None]
         return round(sum(vals) / len(vals), 1) if vals else None
 
+    def avg_tts_ttfb():
+        vals = [
+            s.get("tts_ttfb_ms") or s.get("tts_first_byte_ms")
+            for s in samples
+            if s.get("tts_ttfb_ms") is not None or s.get("tts_first_byte_ms") is not None
+        ]
+        return round(sum(vals) / len(vals), 1) if vals else None
+
     return {
         "turn_count": len(samples),
         "avg_stt_ms": avg("stt_ms"),
         "avg_llm_first_token_ms": avg("llm_first_token_ms"),
-        "avg_tts_first_byte_ms": avg("tts_first_byte_ms"),
+        "avg_tts_ttfb_ms": avg_tts_ttfb(),
     }

@@ -6,6 +6,13 @@ import os
 
 from livekit.plugins import openai
 
+from agent.prompts import get_voice_agent_instructions as build_voice_agent_instructions
+
+
+def get_voice_agent_instructions(language: str = "en") -> str:
+    """System instructions applied when the voice Agent / LLM session starts."""
+    return build_voice_agent_instructions(language)
+
 
 def build_openrouter_llm() -> openai.LLM:
     return openai.LLM(

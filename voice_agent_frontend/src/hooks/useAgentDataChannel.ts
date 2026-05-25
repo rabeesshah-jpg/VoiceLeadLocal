@@ -3,6 +3,15 @@ import type { Room } from 'livekit-client';
 import { RoomEvent } from 'livekit-client';
 import { log } from '../lib/logger';
 import {
+  applyAssistantTranscript,
+  applyUserTranscript,
+  finishAssistantStreaming,
+  removeIncompleteAssistant,
+  turnsToBubbles,
+  type ChatTurn,
+} from '../lib/chatTurns';
+import type { ChatBubble } from '../lib/chatTurns';
+import {
   applyLlmMilestone,
   applyTtsMilestone,
   applyTurnSummaryLatency,
@@ -16,6 +25,7 @@ import {
 } from '../lib/latencyEvents';
 
 export type { MilestoneStatus, TurnLatencyMetrics } from '../lib/latencyEvents';
+export type { ChatBubble };
 
 export type AgentUiState =
   | 'idle'
@@ -31,12 +41,18 @@ export interface AgentDataMessage {
   state?: AgentUiState;
   text?: string;
   is_final?: boolean;
+  interrupted?: boolean;
+  message_id?: string;
+  turn_seq?: number;
   code?: string;
   message?: string;
   stt_ms?: number;
   llm_first_token_ms?: number;
+  tts_ttfb_ms?: number;
   tts_first_byte_ms?: number;
   tts_first_chunk_ms?: number;
+  tts_total_ms?: number;
+  tts_call_count?: number;
   duration_ms?: number;
   ts?: number;
   turn_id?: string;
@@ -45,10 +61,8 @@ export interface AgentDataMessage {
 }
 
 export interface TranscriptState {
-  userLines: string[];
-  agentLines: string[];
-  pendingUser: string;
-  pendingAgent: string;
+  /** Alternating user / assistant bubbles derived from turns. */
+  bubbles: ChatBubble[];
   agentState: AgentUiState;
   lastLatency: AgentDataMessage | null;
   lastError: string | null;
@@ -56,31 +70,24 @@ export interface TranscriptState {
 }
 
 const initial: TranscriptState = {
-  userLines: [],
-  agentLines: [],
-  pendingUser: '',
-  pendingAgent: '',
+  bubbles: [],
   agentState: 'idle',
   lastLatency: null,
   lastError: null,
   turnMetrics: initialTurnLatencyMetrics,
 };
 
-function normalizeText(s: string): string {
-  return s.trim().replace(/\s+/g, ' ').toLowerCase();
-}
-
 export function useAgentDataChannel() {
   const [state, setState] = useState<TranscriptState>(initial);
 
-  const lastUserFinalRef = useRef('');
-  const lastAgentFinalRef = useRef('');
+  const turnsRef = useRef<ChatTurn[]>([]);
+  const seenUserMessageIdsRef = useRef<Set<string>>(new Set());
   const primaryAgentRef = useRef<string | null>(null);
   const boundRoomNameRef = useRef<string | null>(null);
 
   const reset = useCallback(() => {
-    lastUserFinalRef.current = '';
-    lastAgentFinalRef.current = '';
+    turnsRef.current = [];
+    seenUserMessageIdsRef.current.clear();
     primaryAgentRef.current = null;
     boundRoomNameRef.current = null;
     setState(initial);
@@ -103,65 +110,110 @@ export function useAgentDataChannel() {
       const kind = getTelemetryEventKind(msg);
 
       setState((prev) => {
-        const next = { ...prev };
+        let turns = [...turnsRef.current];
+        let patch: Partial<TranscriptState> = {};
+
         switch (kind) {
           case 'agent_state':
             if (msg.state) {
-              next.agentState = msg.state;
+              const old = prev.agentState;
+              patch.agentState = msg.state;
+
+              if (msg.state === 'listening' && old === 'speaking') {
+                turns = finishAssistantStreaming(turns);
+              }
+
               if (
-                msg.state === 'listening' &&
-                prev.turnMetrics.turnActive
+                msg.state === 'interrupted' ||
+                (msg.state === 'thinking' && old === 'speaking')
               ) {
-                next.turnMetrics = finalizeWaitingMilestones(prev.turnMetrics);
+                turns = removeIncompleteAssistant(turns);
+                turns = finishAssistantStreaming(turns);
+              }
+
+              if (msg.state === 'listening' && prev.turnMetrics.turnActive) {
+                patch.turnMetrics = finalizeWaitingMilestones(prev.turnMetrics);
               }
             }
             break;
-          case 'user_transcript':
-            if (!msg.text) break;
-            if (msg.is_final) {
-              const norm = normalizeText(msg.text);
-              if (norm && norm !== lastUserFinalRef.current) {
-                lastUserFinalRef.current = norm;
-                next.userLines = [...prev.userLines, msg.text.trim()];
-                next.pendingUser = '';
-                if (norm) {
-                  next.turnMetrics = startNewTurnMetrics(prev.turnMetrics);
-                }
-              }
+
+          case 'llm_playback_end':
+            if (msg.interrupted) {
+              turns = removeIncompleteAssistant(turns);
             } else {
-              next.pendingUser = msg.text;
+              turns = finishAssistantStreaming(turns);
             }
             break;
-          case 'agent_text':
+
+          case 'user_transcript': {
             if (!msg.text) break;
-            if (msg.is_final) {
-              const norm = normalizeText(msg.text);
-              if (norm && norm !== lastAgentFinalRef.current) {
-                lastAgentFinalRef.current = norm;
-                next.agentLines = [...prev.agentLines, msg.text.trim()];
-                next.pendingAgent = '';
+            const isFinal = Boolean(msg.is_final);
+            log('transcript_event', {
+              role: 'user',
+              is_final: isFinal,
+              message_id: msg.message_id,
+              turn_seq: msg.turn_seq,
+              text_preview: msg.text.slice(0, 80),
+            });
+
+            if (isFinal && msg.message_id && seenUserMessageIdsRef.current.has(msg.message_id)) {
+              log('transcript_skip_duplicate_id', { message_id: msg.message_id });
+              break;
+            }
+
+            turns = applyUserTranscript(turns, msg.text, isFinal);
+
+            if (isFinal) {
+              if (msg.message_id) {
+                seenUserMessageIdsRef.current.add(msg.message_id);
               }
-            } else {
-              next.pendingAgent = msg.text;
+              patch.turnMetrics = startNewTurnMetrics(prev.turnMetrics);
+              log('transcript_append_user', {
+                message_id: msg.message_id,
+                turn_seq: msg.turn_seq,
+                text_preview: msg.text.slice(0, 80),
+                turn_count: turns.length,
+              });
             }
             break;
+          }
+
+          case 'llm_response':
+          case 'agent_text': {
+            if (!msg.text?.trim()) break;
+            log('llm_response_event', {
+              type: kind,
+              text_preview: msg.text.slice(0, 80),
+            });
+            turns = applyAssistantTranscript(turns, msg.text, true);
+            break;
+          }
+
           case 'latency':
           case 'voice_turn_latency_summary':
-            next.lastLatency = msg;
-            next.turnMetrics = applyTurnSummaryLatency(prev.turnMetrics, msg);
+            patch.lastLatency = msg;
+            patch.turnMetrics = applyTurnSummaryLatency(prev.turnMetrics, msg);
             break;
+
           case 'error':
-            next.lastError = msg.message || msg.code || 'Unknown error';
+            patch.lastError = msg.message || msg.code || 'Unknown error';
             break;
+
           default:
             if (isLlmMilestoneEvent(kind, msg)) {
-              next.turnMetrics = applyLlmMilestone(prev.turnMetrics, msg);
+              patch.turnMetrics = applyLlmMilestone(prev.turnMetrics, msg);
             } else if (isTtsMilestoneEvent(kind, msg)) {
-              next.turnMetrics = applyTtsMilestone(prev.turnMetrics, msg);
+              patch.turnMetrics = applyTtsMilestone(prev.turnMetrics, msg);
             }
             break;
         }
-        return next;
+
+        turnsRef.current = turns;
+        return {
+          ...prev,
+          ...patch,
+          bubbles: turnsToBubbles(turns),
+        };
       });
     } catch {
       /* ignore malformed */

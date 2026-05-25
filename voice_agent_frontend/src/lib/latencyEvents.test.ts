@@ -19,11 +19,15 @@ describe('latencyEvents', () => {
       type: 'latency',
       turn_id: 'abc123',
       llm_first_token_ms: 420,
-      tts_first_byte_ms: 760,
+      tts_ttfb_ms: 760,
+      tts_total_ms: 2100,
+      tts_call_count: 3,
     });
     expect(result.turnId).toBe('abc123');
     expect(result.llmFirstTokenMs).toBe(420);
     expect(result.ttsFirstChunkMs).toBe(760);
+    expect(result.ttsTotalMs).toBe(2100);
+    expect(result.ttsCallCount).toBe(3);
     expect(result.llmStatus).toBe('received');
     expect(result.ttsStatus).toBe('received');
     expect(result.turnActive).toBe(false);

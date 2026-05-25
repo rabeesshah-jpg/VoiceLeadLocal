@@ -1,11 +1,11 @@
 export default function IntroSection() {
   return (
     <section className="intro-section">
-      <h1 className="intro-heading">Hey, I&apos;m your AI Assistant</h1>
+      <h1 className="intro-heading">Voice calling agent</h1>
       <p className="intro-description">
-        A voice-enabled digital assistant powered by LiveKit. Ask questions, explore
-        ideas, or start a real-time conversation — I listen and respond through natural
-        speech.
+        Real-time voice calls powered by LiveKit. Pick a male or female voice, start a
+        call, and speak — the assistant listens and replies with natural speech. No
+        typing required.
       </p>
     </section>
   );

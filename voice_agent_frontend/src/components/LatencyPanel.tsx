@@ -26,7 +26,7 @@ export default function LatencyPanel({ metrics }: Props) {
           <dd>{formatMilestone(metrics.llmStatus, metrics.llmFirstTokenMs)}</dd>
         </div>
         <div className="latency-row">
-          <dt>TTS First Chunk</dt>
+          <dt>TTS (first audio)</dt>
           <dd>{formatMilestone(metrics.ttsStatus, metrics.ttsFirstChunkMs)}</dd>
         </div>
         {showTurn && (

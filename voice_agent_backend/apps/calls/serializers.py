@@ -4,7 +4,19 @@ from apps.calls.models import CallEvent, CallSession
 
 
 class StartCallSerializer(serializers.Serializer):
-    persona_id = serializers.CharField(required=False, allow_blank=True, default="")
+    persona_id = serializers.ChoiceField(
+        choices=["male", "female", ""],
+        required=False,
+        allow_blank=True,
+        default="",
+        help_text="Voice preset: male → Michael.wav, female → Olivia.wav",
+    )
+    language = serializers.ChoiceField(
+        choices=["en", "ar"],
+        required=False,
+        default="en",
+        help_text="Conversation language: en (English) or ar (Arabic)",
+    )
     system_prompt = serializers.CharField(required=False, allow_blank=True, default="")
 
 
@@ -29,6 +41,7 @@ class CallSessionDetailSerializer(serializers.ModelSerializer):
             "user_identity",
             "status",
             "persona_id",
+            "language",
             "created_at",
             "ended_at",
             "end_reason",

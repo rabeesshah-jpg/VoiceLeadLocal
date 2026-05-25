@@ -13,10 +13,12 @@ from pathlib import Path
 LOG_DIR_NAME = "logs"
 API_LOG_NAME = "voice_agent_api.log"
 WORKER_LOG_NAME = "voice_agent_worker.log"
+PIPELINE_LATENCY_LOG_NAME = "voice_agent_pipeline_latency.log"
 COMBINED_LOG_NAME = "voice_agent.log"
 
 _api_configured = False
 _worker_configured = False
+_pipeline_latency_configured = False
 
 
 class VoiceAgentFormatter(logging.Formatter):
@@ -111,6 +113,40 @@ def setup_api_logging(base_dir: Path) -> Path:
     return log_path
 
 
+def setup_pipeline_latency_logging(base_dir: Path) -> Path:
+    """Dedicated file for STT → LLM → TTS milestone timings (worker only)."""
+    global _pipeline_latency_configured
+    log_path = _log_dir(base_dir) / PIPELINE_LATENCY_LOG_NAME
+    if _pipeline_latency_configured:
+        return log_path
+    _pipeline_latency_configured = True
+
+    _write_session_header(log_path, "PIPELINE LATENCY (STT / LLM / TTS)")
+    formatter = VoiceAgentFormatter()
+    file_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(logging.INFO)
+
+    for log_name in (
+        "agent.observability.pipeline_latency",
+        "agent.observability.pipeline_events",
+    ):
+        plog = logging.getLogger(log_name)
+        plog.setLevel(logging.INFO)
+        plog.handlers.clear()
+        plog.propagate = False
+        plog.addHandler(file_handler)
+
+    plog = logging.getLogger("agent.observability.pipeline_latency")
+    plog.info(
+        "\n%s\n  pipeline latency log initialized\n  log_file ....... %s\n%s",
+        "=" * 80,
+        log_path,
+        "=" * 80,
+    )
+    return log_path
+
+
 def setup_worker_logging(base_dir: Path) -> Path:
     """Clear worker log file and configure handlers. Call once per worker process."""
     global _worker_configured
@@ -127,8 +163,10 @@ def setup_worker_logging(base_dir: Path) -> Path:
             "agent.entrypoint",
             "agent.pipeline",
             "agent.observability",
+            "agent.voice_agent",
         ),
     )
+    setup_pipeline_latency_logging(base_dir)
     return log_path
 
 

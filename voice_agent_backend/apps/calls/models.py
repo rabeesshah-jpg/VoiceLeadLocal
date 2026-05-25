@@ -22,6 +22,7 @@ class CallSession(models.Model):
     user_identity = models.CharField(max_length=128)
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_CREATED)
     persona_id = models.CharField(max_length=64, blank=True, default="")
+    language = models.CharField(max_length=8, default="en")
     system_prompt = models.TextField(blank=True, default="")
     token_expires_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

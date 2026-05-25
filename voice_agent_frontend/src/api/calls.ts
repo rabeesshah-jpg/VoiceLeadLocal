@@ -64,13 +64,22 @@ async function apiFetch(
   }
 }
 
-export async function startCall(systemPrompt?: string): Promise<StartCallResponse> {
+export interface StartCallOptions {
+  system_prompt?: string;
+  /** male → Michael.wav, female → Olivia.wav (+ TTS expressiveness params) */
+  persona_id?: 'male' | 'female' | '';
+}
+
+export async function startCall(options: StartCallOptions = {}): Promise<StartCallResponse> {
   const res = await apiFetch(
     '/api/calls/start/',
     {
       method: 'POST',
       headers: headers(),
-      body: JSON.stringify({ system_prompt: systemPrompt || '' }),
+      body: JSON.stringify({
+        system_prompt: options.system_prompt || '',
+        persona_id: options.persona_id || '',
+      }),
     },
     'start_call',
   );

@@ -4,30 +4,29 @@ interface Props {
   state: TranscriptState;
 }
 
+function roleLabel(role: 'user' | 'llm'): string {
+  return role === 'user' ? 'You' : 'Assistant';
+}
+
 export default function TranscriptPanel({ state }: Props) {
-  const userDisplay = [
-    ...state.userLines,
-    ...(state.pendingUser && !state.userLines.includes(state.pendingUser)
-      ? [`${state.pendingUser} …`]
-      : []),
-  ];
-  const agentDisplay = [
-    ...state.agentLines,
-    ...(state.pendingAgent && !state.agentLines.includes(state.pendingAgent)
-      ? [`${state.pendingAgent} …`]
-      : []),
-  ];
+  if (state.bubbles.length === 0) {
+    return null;
+  }
 
   return (
     <div className="chat-messages">
-      {userDisplay.map((line, i) => (
-        <div key={`u-${i}`} className="chat-bubble chat-bubble--user">
-          {line}
-        </div>
-      ))}
-      {agentDisplay.map((line, i) => (
-        <div key={`a-${i}`} className="chat-bubble chat-bubble--agent">
-          {line}
+      {state.bubbles.map((bubble) => (
+        <div
+          key={bubble.id}
+          className={`chat-bubble chat-bubble--${bubble.role}${
+            bubble.pending ? ' chat-bubble--pending' : ''
+          }`}
+        >
+          <span className="chat-bubble-label">{roleLabel(bubble.role)}</span>
+          <p className="chat-bubble-text">
+            {bubble.text}
+            {bubble.pending ? ' …' : ''}
+          </p>
         </div>
       ))}
     </div>

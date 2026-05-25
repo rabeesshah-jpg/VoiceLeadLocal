@@ -7,7 +7,7 @@ Standalone Django API + LiveKit agent worker for ultra-low-latency voice convers
 - **LiveKit** — WebRTC room / audio transport
 - **Deepgram** — streaming STT (server-side in worker)
 - **OpenRouter** — `openai/gpt-4o-mini` streaming LLM
-- **Cartesia** — streaming TTS
+- **Multilingual TTS** — HTTP (`POST /tts_to_audio/`, `language` + `speaker_wav`, 24 kHz WAV). Set `TTS_PROVIDER=supertonic` for local Supertonic-3.
 
 ## Quick start (local)
 
@@ -15,7 +15,7 @@ Standalone Django API + LiveKit agent worker for ultra-low-latency voice convers
 cd voice_agent_backend
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # fill LIVEKIT_*, DEEPGRAM_*, OPENROUTER_*, CARTESIA_*
+cp .env.example .env   # fill LIVEKIT_*, DEEPGRAM_*, OPENROUTER_*, TTS_BASE_URL
 python manage.py migrate
 python manage.py runserver 8001
 ```
@@ -54,6 +54,7 @@ Each process **clears its log file on startup** and writes formatted step logs w
 |---------|----------|
 | Django API (`runserver 8001`) | `logs/voice_agent_api.log` |
 | Agent worker (`python -m agent dev`) | `logs/voice_agent_worker.log` |
+| Pipeline latency (STT → LLM → TTS milestones) | `logs/voice_agent_pipeline_latency.log` |
 
 Restart the API or worker to rotate logs (previous content is replaced, not appended).
 

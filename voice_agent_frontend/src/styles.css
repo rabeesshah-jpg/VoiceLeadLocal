@@ -327,11 +327,31 @@ body {
   border-bottom-right-radius: 0.25rem;
 }
 
-.chat-bubble--agent {
+.chat-bubble--agent,
+.chat-bubble--llm {
   align-self: flex-start;
   background: #eff6ff;
   color: #1e3a5f;
   border-bottom-left-radius: 0.25rem;
+}
+
+.chat-bubble-label {
+  display: block;
+  margin: 0 0 0.25rem;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #64748b;
+}
+
+.chat-bubble-text {
+  margin: 0;
+}
+
+.chat-bubble--pending {
+  opacity: 0.85;
+  border: 1px dashed #93c5fd;
 }
 
 /* —— Latency panel —— */
@@ -411,7 +431,87 @@ body {
   text-align: center;
 }
 
-/* —— Input area —— */
+/* —— Call footer (voice + call button, no text input) —— */
+
+.call-footer {
+  border-top: 1px solid var(--border);
+  padding: 1rem 1.25rem 0.75rem;
+}
+
+.call-footer-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem 1rem;
+}
+
+.voice-select-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.voice-select {
+  min-width: 11rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.55rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #111827;
+  background: #fff;
+  cursor: pointer;
+}
+
+.voice-select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.call-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border: none;
+  border-radius: 999px;
+  padding: 0.7rem 1.35rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent-green);
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s;
+}
+
+.call-btn:hover:not(:disabled) {
+  background: #16a34a;
+}
+
+.call-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.call-btn--active {
+  background: #ef4444;
+}
+
+.call-btn--active:hover:not(:disabled) {
+  background: #dc2626;
+}
+
+.chat-empty-icon--call {
+  background: #ecfdf5;
+  color: var(--accent-green);
+}
+
+.chat-empty-icon--call svg {
+  width: 1.35rem;
+  height: 1.35rem;
+}
+
+/* —— Legacy input area (unused) —— */
 
 .chat-footer-input {
   border-top: 1px solid var(--border);
