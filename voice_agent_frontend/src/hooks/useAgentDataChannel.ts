@@ -47,6 +47,7 @@ export interface AgentDataMessage {
   code?: string;
   message?: string;
   stt_ms?: number;
+  llm_start_ms?: number;
   llm_first_token_ms?: number;
   tts_ttfb_ms?: number;
   tts_first_byte_ms?: number;
@@ -156,16 +157,27 @@ export function useAgentDataChannel() {
               text_preview: msg.text.slice(0, 80),
             });
 
-            if (isFinal && msg.message_id && seenUserMessageIdsRef.current.has(msg.message_id)) {
-              log('transcript_skip_duplicate_id', { message_id: msg.message_id });
+            const dedupeKey =
+              msg.message_id ||
+              (isFinal && msg.turn_seq
+                ? `final:${msg.turn_seq}:${msg.text.trim()}`
+                : '');
+
+            if (isFinal && dedupeKey && seenUserMessageIdsRef.current.has(dedupeKey)) {
+              log('transcript_skip_duplicate_id', { message_id: dedupeKey });
               break;
             }
 
-            turns = applyUserTranscript(turns, msg.text, isFinal);
+            turns = applyUserTranscript(
+              turns,
+              msg.text,
+              isFinal,
+              msg.turn_seq,
+            );
 
             if (isFinal) {
-              if (msg.message_id) {
-                seenUserMessageIdsRef.current.add(msg.message_id);
+              if (dedupeKey) {
+                seenUserMessageIdsRef.current.add(dedupeKey);
               }
               patch.turnMetrics = startNewTurnMetrics(prev.turnMetrics);
               log('transcript_append_user', {
@@ -181,13 +193,30 @@ export function useAgentDataChannel() {
           case 'llm_response':
           case 'agent_text': {
             if (!msg.text?.trim()) break;
+            const streaming = kind === 'llm_response' ? !msg.is_final : true;
             log('llm_response_event', {
               type: kind,
+              is_final: msg.is_final,
               text_preview: msg.text.slice(0, 80),
             });
-            turns = applyAssistantTranscript(turns, msg.text, true);
+            const lastTurn = turns.at(-1);
+            if (
+              lastTurn?.userFinal &&
+              lastTurn.assistantText.trim() === msg.text.trim()
+            ) {
+              if (!streaming) {
+                turns = finishAssistantStreaming(turns);
+              }
+            } else {
+              turns = applyAssistantTranscript(turns, msg.text, streaming);
+            }
             break;
           }
+
+          case 'llm_start':
+          case 'llm_first_token':
+            patch.turnMetrics = applyLlmMilestone(prev.turnMetrics, msg);
+            break;
 
           case 'latency':
           case 'voice_turn_latency_summary':

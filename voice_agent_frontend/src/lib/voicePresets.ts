@@ -1,36 +1,30 @@
-/** Chatterbox voice presets sent with POST /api/calls/start/ */
+/** Supertonic voice presets (male → M1, female → F1). */
 
 export type VoiceGender = 'male' | 'female';
 
 export interface TtsVoiceSettings {
-  predefined_voice_id: string;
-  exaggeration: number;
-  temperature: number;
-  cfg_weight: number;
+  voice: string;
+  lang: string;
 }
 
 export const VOICE_PRESETS: Record<VoiceGender, { label: string; tts: TtsVoiceSettings }> = {
   male: {
-    label: 'Male (Michael)',
+    label: 'Male (M1)',
     tts: {
-      predefined_voice_id: 'Michael.wav',
-      exaggeration: 0.65,
-      temperature: 0.8,
-      cfg_weight: 0.45,
+      voice: 'M1',
+      lang: 'en',
     },
   },
   female: {
-    label: 'Female (Olivia)',
+    label: 'Female (F1)',
     tts: {
-      predefined_voice_id: 'Olivia.wav',
-      exaggeration: 0.65,
-      temperature: 0.8,
-      cfg_weight: 0.45,
+      voice: 'F1',
+      lang: 'en',
     },
   },
 };
 
-export const DEFAULT_VOICE_GENDER: VoiceGender = 'female';
+export const DEFAULT_VOICE_GENDER: VoiceGender = 'male';
 
 export function isVoiceGender(value: string): value is VoiceGender {
   return value === 'male' || value === 'female';

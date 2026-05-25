@@ -6,6 +6,7 @@ export interface TelemetryPayload {
   duration_ms?: number;
   ts?: number;
   stt_ms?: number;
+  llm_start_ms?: number;
   llm_first_token_ms?: number;
   tts_first_byte_ms?: number;
   tts_ttfb_ms?: number;
@@ -45,6 +46,8 @@ export const initialTurnLatencyMetrics: TurnLatencyMetrics = {
 };
 
 const LLM_MILESTONE_EVENTS = new Set([
+  'llm_start',
+  'llm_started',
   'llm_first_token',
   'llm_first_token_generated',
   'llm_token_first',
@@ -107,7 +110,7 @@ export function applyLlmMilestone(
   metrics: TurnLatencyMetrics,
   msg: TelemetryPayload,
 ): TurnLatencyMetrics {
-  const ms = readMs(msg.duration_ms, msg.llm_first_token_ms);
+  const ms = readMs(msg.duration_ms, msg.llm_start_ms, msg.llm_first_token_ms);
   if (ms === null) return metrics;
   return {
     ...metrics,
@@ -148,19 +151,13 @@ export function applyTurnSummaryLatency(
     turnActive: false,
   };
 
-  const llmMs = readMs(msg.llm_first_token_ms);
-  if (next.llmStatus === 'waiting') {
-    if (llmMs !== null) {
-      next.llmFirstTokenMs = llmMs;
-      next.llmFirstTokenAt = readTs(msg);
-      next.llmStatus = 'received';
-    } else {
-      next.llmStatus = 'not_received';
-    }
-  } else if (llmMs !== null && next.llmFirstTokenMs === null) {
+  const llmMs = readMs(msg.llm_start_ms, msg.llm_first_token_ms);
+  if (llmMs !== null) {
     next.llmFirstTokenMs = llmMs;
     next.llmFirstTokenAt = readTs(msg);
     next.llmStatus = 'received';
+  } else if (next.llmStatus === 'waiting') {
+    next.llmStatus = 'not_received';
   }
 
   const ttsMs = readMs(msg.tts_ttfb_ms, msg.tts_first_byte_ms, msg.tts_first_chunk_ms);

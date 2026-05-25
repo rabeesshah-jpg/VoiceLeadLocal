@@ -1,10 +1,14 @@
 import { IconPhone } from './icons';
+import type { CallLanguage } from '../lib/callLanguage';
+import { CALL_LANGUAGES } from '../lib/callLanguage';
 import type { VoiceGender } from '../lib/voicePresets';
 import { VOICE_PRESETS } from '../lib/voicePresets';
 
 interface Props {
   voice: VoiceGender;
   onVoiceChange: (voice: VoiceGender) => void;
+  language: CallLanguage;
+  onLanguageChange: (language: CallLanguage) => void;
   inCall: boolean;
   busy: boolean;
   onCall: () => void;
@@ -13,6 +17,8 @@ interface Props {
 export default function CallFooter({
   voice,
   onVoiceChange,
+  language,
+  onLanguageChange,
   inCall,
   busy,
   onCall,
@@ -20,6 +26,24 @@ export default function CallFooter({
   return (
     <div className="call-footer">
       <div className="call-footer-controls">
+        <label className="voice-select-label" htmlFor="language-select">
+          Language
+        </label>
+        <select
+          id="language-select"
+          className="voice-select"
+          value={language}
+          onChange={(e) => onLanguageChange(e.target.value as CallLanguage)}
+          disabled={inCall || busy}
+          aria-label="Select conversation language"
+        >
+          {CALL_LANGUAGES.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+
         <label className="voice-select-label" htmlFor="voice-select">
           Voice
         </label>

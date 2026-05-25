@@ -1,3 +1,4 @@
+import type { CallLanguage } from '../lib/callLanguage';
 import { log, logError, logWarn } from '../lib/logger';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
@@ -68,6 +69,8 @@ export interface StartCallOptions {
   system_prompt?: string;
   /** male → Michael.wav, female → Olivia.wav (+ TTS expressiveness params) */
   persona_id?: 'male' | 'female' | '';
+  /** en (English) or ar (Arabic) */
+  language?: CallLanguage;
 }
 
 export async function startCall(options: StartCallOptions = {}): Promise<StartCallResponse> {
@@ -79,6 +82,7 @@ export async function startCall(options: StartCallOptions = {}): Promise<StartCa
       body: JSON.stringify({
         system_prompt: options.system_prompt || '',
         persona_id: options.persona_id || '',
+        language: options.language || 'en',
       }),
     },
     'start_call',
@@ -100,6 +104,7 @@ export async function startCall(options: StartCallOptions = {}): Promise<StartCa
     room: body.room_name,
     livekitUrl: body.livekit_url,
     identity: body.participant_identity,
+    language: options.language || 'en',
     tokenLength: body.participant_token?.length ?? 0,
   });
   return body;

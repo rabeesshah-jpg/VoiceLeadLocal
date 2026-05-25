@@ -3,6 +3,10 @@ import { LiveKitRoom, RoomAudioRenderer } from '@livekit/components-react';
 import { endCall, getHealth, startCall, type StartCallResponse } from '../api/calls';
 import { log, logError } from '../lib/logger';
 import {
+  DEFAULT_CALL_LANGUAGE,
+  type CallLanguage,
+} from '../lib/callLanguage';
+import {
   DEFAULT_VOICE_GENDER,
   type VoiceGender,
   VOICE_PRESETS,
@@ -26,6 +30,7 @@ export default function VoiceCallPage() {
   const [muted, setMuted] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
   const [voice, setVoice] = useState<VoiceGender>(DEFAULT_VOICE_GENDER);
+  const [language, setLanguage] = useState<CallLanguage>(DEFAULT_CALL_LANGUAGE);
   const { state: transcriptState, bindRoom, reset } = useAgentDataChannel();
 
   useEffect(() => {
@@ -44,13 +49,18 @@ export default function VoiceCallPage() {
     setBusy(true);
     setApiError(null);
     reset();
-    log('ui_start_call_clicked', { voice, tts: VOICE_PRESETS[voice].tts });
+    log('ui_start_call_clicked', {
+      voice,
+      language,
+      tts: VOICE_PRESETS[voice].tts,
+    });
     try {
-      const s = await startCall({ persona_id: voice });
+      const s = await startCall({ persona_id: voice, language });
       log('ui_livekit_connecting', {
         room: s.room_name,
         url: s.livekit_url,
         voice,
+        language,
       });
       setSession(s);
     } catch (e) {
@@ -60,7 +70,7 @@ export default function VoiceCallPage() {
     } finally {
       setBusy(false);
     }
-  }, [reset, voice]);
+  }, [reset, voice, language]);
 
   const handleEnd = useCallback(async () => {
     if (!session) return;
@@ -126,9 +136,14 @@ export default function VoiceCallPage() {
           ) : (
             <>
               {hasMessages && <TranscriptPanel state={transcriptState} />}
-              {inCall && <AudioVisualizer agentState={transcriptState.agentState} />}
-              {!hasMessages && inCall && (
-                <p className="chat-body-hint">Call connected — speak to begin.</p>
+              {inCall && (
+                <AudioVisualizer
+                  agentState={transcriptState.agentState}
+                  awaitingIntroduction={transcriptState.agentState === 'idle'}
+                />
+              )}
+              {!hasMessages && inCall && transcriptState.agentState === 'idle' && (
+                <p className="chat-body-hint">Connecting to agent…</p>
               )}
             </>
           )}
@@ -137,6 +152,8 @@ export default function VoiceCallPage() {
         <CallFooter
           voice={voice}
           onVoiceChange={setVoice}
+          language={language}
+          onLanguageChange={setLanguage}
           inCall={inCall}
           busy={busy}
           onCall={handleCallAction}

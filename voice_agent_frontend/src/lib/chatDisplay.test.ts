@@ -3,9 +3,9 @@ import { formatChatDisplayText } from './chatDisplay';
 import { appendUserMessage } from './llmTranscript';
 
 describe('formatChatDisplayText', () => {
-  it('removes paralinguistic tags', () => {
-    expect(formatChatDisplayText('Hi [chuckle], how are you?')).toBe('Hi, how are you?');
-    expect(formatChatDisplayText('Well [sigh] ok [laugh]')).toBe('Well ok');
+  it('removes supertonic and chatterbox tags', () => {
+    expect(formatChatDisplayText('Hi <breath>, how are you?')).toBe('Hi, how are you?');
+    expect(formatChatDisplayText('Well [sigh] ok <laugh>')).toBe('Well ok');
     expect(formatChatDisplayText('[clear throat] One moment')).toBe('One moment');
   });
 });

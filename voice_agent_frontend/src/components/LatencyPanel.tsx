@@ -8,7 +8,7 @@ function formatMilestone(
   status: MilestoneStatus,
   ms: number | null,
 ): string {
-  if (status === 'received' && ms !== null) return `${ms} ms`;
+  if (ms !== null) return `${ms} ms`;
   if (status === 'waiting') return 'Waiting...';
   if (status === 'not_received') return 'Not received';
   return '—';
@@ -22,7 +22,7 @@ export default function LatencyPanel({ metrics }: Props) {
       <h3 className="latency-panel-title">Latency</h3>
       <dl className="latency-panel-grid">
         <div className="latency-row">
-          <dt>LLM First Token</dt>
+          <dt>LLM Start</dt>
           <dd>{formatMilestone(metrics.llmStatus, metrics.llmFirstTokenMs)}</dd>
         </div>
         <div className="latency-row">

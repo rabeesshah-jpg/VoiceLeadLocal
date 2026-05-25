@@ -1,0 +1,6 @@
+# Local / accidental files
+To
+
+# TTS/STT dev scripts and generated audio (not part of the app)
+test_tts_stream.py
+*.wav
