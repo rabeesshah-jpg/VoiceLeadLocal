@@ -89,7 +89,7 @@ class TurnLatency:
                 return int(delta * 1000)
         return None
 
-    def to_payload(self) -> dict:
+    def to_payload(self, *, pipeline_summary: dict | None = None) -> dict:
         base = self._start
 
         def ms(ts: float | None) -> int | None:
@@ -112,4 +112,37 @@ class TurnLatency:
         }
         if self.tts_calls:
             payload["tts_calls"] = [c.to_dict() for c in self.tts_calls]
+        if pipeline_summary:
+            for key in (
+                "e2e_to_first_audio_ms",
+                "stt_post_speech_ms",
+                "stt_speech_end_to_final_ms",
+                "stt_wall_ms",
+                "stt_first_partial_ms",
+                "stt_speech_duration_ms",
+                "user_speech_duration_ms",
+                "stt_total_ms",
+                "stt_partial_count",
+                "stt_final_transcript_length",
+                "stt_rejected",
+                "stt_rejection_reason",
+                "deepgram_endpointing_ms",
+                "stt_provider",
+                "llm_total_ms",
+                "llm_time_to_first_token_ms",
+                "llm_start_after_stt_final_ms",
+                "tts_http_total_ms",
+                "tts_time_to_first_audio_ms",
+                "audio_push_duration_ms",
+                "playback_total_ms",
+                "e2e_to_playback_complete_ms",
+                "transcript_length",
+                "assistant_response_length",
+                "prompt_tokens",
+                "completion_tokens",
+                "total_tokens",
+            ):
+                val = pipeline_summary.get(key)
+                if val is not None and payload.get(key) is None:
+                    payload[key] = val
         return payload

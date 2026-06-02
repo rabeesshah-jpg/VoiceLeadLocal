@@ -237,6 +237,7 @@ class SynthesizeStream(tts.SynthesizeStream):
                 yield phrase
         pipeline = self._tts._pipeline
         if pipeline:
+            pipeline.mark_llm_complete()
             log_pipeline_event(
                 "LLM_DONE",
                 room=pipeline.room,
@@ -310,6 +311,7 @@ class SynthesizeStream(tts.SynthesizeStream):
                 parts.append(token)
             pipeline = self._tts._pipeline
             if pipeline:
+                pipeline.mark_llm_complete()
                 log_pipeline_event(
                     "LLM_DONE",
                     room=pipeline.room,

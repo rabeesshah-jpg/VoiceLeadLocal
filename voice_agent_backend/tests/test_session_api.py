@@ -8,7 +8,9 @@ def api_client(settings):
     settings.LIVEKIT_URL = "wss://test.livekit.cloud"
     settings.LIVEKIT_API_KEY = "APItest"
     settings.LIVEKIT_API_SECRET = "secret_test_key_32chars_minimum_xx"
-    settings.DEEPGRAM_API_KEY = "dg-test"
+    settings.STT_PROVIDER = "faster_whisper"
+    settings.STT_WS_URL = "ws://127.0.0.1:8000/asr"
+    settings.DEEPGRAM_API_KEY = ""
     settings.OPENROUTER_API_KEY = "or-test"
     settings.TTS_BASE_URL = "http://supertonic-test.example:7788"
     client = Client()
@@ -74,12 +76,35 @@ def test_start_call_rejects_invalid_language(api_client):
 
 
 @pytest.mark.django_db
+def test_start_call_faster_whisper_without_deepgram(monkeypatch, settings):
+    monkeypatch.setenv("STT_PROVIDER", "wlk")
+    monkeypatch.setenv("STT_WS_URL", "ws://127.0.0.1:8000/asr")
+    settings.STT_PROVIDER = "wlk"
+    settings.DEEPGRAM_API_KEY = ""
+    client = Client()
+    client.defaults["HTTP_X_VOICE_AGENT_DEV_KEY"] = "test-api-key"
+    settings.LIVEKIT_URL = "wss://test.livekit.cloud"
+    settings.LIVEKIT_API_KEY = "APItest"
+    settings.LIVEKIT_API_SECRET = "secret_test_key_32chars_minimum_xx"
+    settings.OPENROUTER_API_KEY = "or-test"
+    settings.TTS_BASE_URL = "http://supertonic-test.example:7788"
+    resp = client.post(
+        "/api/calls/start/",
+        data={"language": "en"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 201
+
+
+@pytest.mark.django_db
 def test_start_requires_api_key(settings):
     client = Client()
     settings.LIVEKIT_URL = "wss://test.livekit.cloud"
     settings.LIVEKIT_API_KEY = "APItest"
     settings.LIVEKIT_API_SECRET = "secret_test_key_32chars_minimum_xx"
-    settings.DEEPGRAM_API_KEY = "dg-test"
+    settings.STT_PROVIDER = "faster_whisper"
+    settings.STT_WS_URL = "ws://127.0.0.1:8000/asr"
+    settings.DEEPGRAM_API_KEY = ""
     settings.OPENROUTER_API_KEY = "or-test"
     settings.TTS_BASE_URL = "http://supertonic-test.example:7788"
     resp = client.post("/api/calls/start/", data={}, content_type="application/json")

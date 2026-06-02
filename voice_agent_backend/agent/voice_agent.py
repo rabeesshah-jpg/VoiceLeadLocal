@@ -20,6 +20,7 @@ from agent.pipeline.partial_stt_preemptive import (
     PartialSttPreemptivePolicy,
     preflight_from_interim,
 )
+from agent.pipeline.stt_config import is_faster_whisper_provider
 
 logger = logging.getLogger("agent.voice_agent")
 
@@ -38,6 +39,8 @@ class VoiceAgent(Agent):
         publisher: DataChannelPublisher | None = None,
         pipeline_tracker: TurnPipelineTracker | None = None,
         on_llm_first_token: Callable[[], None] | None = None,
+        on_vad_speech_start: Callable[[], None] | None = None,
+        on_vad_speech_end: Callable[[], None] | None = None,
         greeting_complete: list[bool] | None = None,
         room: str = "",
         **kwargs,
@@ -47,9 +50,14 @@ class VoiceAgent(Agent):
         self._publisher = publisher
         self._pipeline = pipeline_tracker
         self._on_llm_first_token = on_llm_first_token
+        self._on_vad_speech_start = on_vad_speech_start
+        self._on_vad_speech_end = on_vad_speech_end
         self._greeting_complete = greeting_complete
         self._room = room
-        self._partial_preemptive = PartialSttPreemptivePolicy.from_env()
+        policy = PartialSttPreemptivePolicy.from_env()
+        if is_faster_whisper_provider():
+            policy.enabled = False
+        self._partial_preemptive = policy
 
     async def on_enter(self) -> None:
         greeting = get_call_greeting(self._language)
@@ -73,6 +81,8 @@ class VoiceAgent(Agent):
             if publisher:
                 await publisher.agent_state("listening")
         finally:
+            if self._pipeline:
+                self._pipeline.end_greeting_phase()
             if self._greeting_complete is not None:
                 self._greeting_complete[0] = True
 
@@ -86,11 +96,20 @@ class VoiceAgent(Agent):
     ):
         """Emit PREFLIGHT from stable interim text so LiveKit can start LLM early."""
         async for event in Agent.default.stt_node(self, audio, model_settings):
-            if event.type in (
-                stt.SpeechEventType.START_OF_SPEECH,
-                stt.SpeechEventType.END_OF_SPEECH,
-            ):
+            if event.type == stt.SpeechEventType.START_OF_SPEECH:
                 self._partial_preemptive.reset()
+                if self._greeting_complete is None or self._greeting_complete[0]:
+                    if self._on_vad_speech_start:
+                        self._on_vad_speech_start()
+                    if self._pipeline:
+                        self._pipeline.mark_user_speech_start()
+            elif event.type == stt.SpeechEventType.END_OF_SPEECH:
+                self._partial_preemptive.reset()
+                if self._greeting_complete is None or self._greeting_complete[0]:
+                    if self._pipeline:
+                        self._pipeline.mark_user_speech_end()
+                    if self._on_vad_speech_end:
+                        self._on_vad_speech_end()
             elif (
                 event.type == stt.SpeechEventType.INTERIM_TRANSCRIPT
                 and event.alternatives

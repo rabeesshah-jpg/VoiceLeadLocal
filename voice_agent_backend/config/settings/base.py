@@ -86,6 +86,17 @@ VOICE_AGENT_TOKEN_TTL_SECONDS = env.int("VOICE_AGENT_TOKEN_TTL_SECONDS", default
 VOICE_AGENT_DEV_API_KEY = env("VOICE_AGENT_DEV_API_KEY", default="dev-local-key")
 
 # Providers (validated at call start; used by agent worker via env)
+STT_PROVIDER = env(
+    "STT_PROVIDER",
+    default=env("VOICE_AGENT_STT_PROVIDER", default="faster_whisper"),
+)
+STT_BASE_URL = env("STT_BASE_URL", default="")
+STT_WS_URL = env("STT_WS_URL", default="")
+STT_LANGUAGE = env("STT_LANGUAGE", default="")
+FASTER_WHISPER_STT_URL = env("FASTER_WHISPER_STT_URL", default="http://localhost:8000")
+FASTER_WHISPER_LANGUAGE = env("FASTER_WHISPER_LANGUAGE", default="auto")
+FASTER_WHISPER_STREAMING = env.bool("FASTER_WHISPER_STREAMING", default=True)
+FASTER_WHISPER_TIMEOUT_SECONDS = env.int("FASTER_WHISPER_TIMEOUT_SECONDS", default=30)
 DEEPGRAM_API_KEY = env("DEEPGRAM_API_KEY", default="")
 OPENROUTER_API_KEY = env("OPENROUTER_API_KEY", default="")
 OPENROUTER_BASE_URL = env("OPENROUTER_BASE_URL", default="https://openrouter.ai/api/v1")

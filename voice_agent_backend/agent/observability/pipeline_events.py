@@ -20,6 +20,12 @@ def _turn_key(room: str, turn_id: str) -> str:
     return f"{room}:{turn_id}" if room and turn_id else turn_id or room or "unknown"
 
 
+def clear_turn_anchor(*, room: str = "", turn_id: str = "") -> None:
+    key = _turn_key(room, turn_id)
+    if key:
+        _turn_t0.pop(key, None)
+
+
 def log_pipeline_event(
     event: str,
     *,

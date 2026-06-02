@@ -35,9 +35,9 @@ class PartialSttPreemptivePolicy:
     """Rate-limit interim → preflight promotion to avoid burning preemptive retries."""
 
     enabled: bool = True
-    min_chars: int = 12
-    min_growth_chars: int = 6
-    min_interval_s: float = 0.4
+    min_chars: int = 6
+    min_growth_chars: int = 3
+    min_interval_s: float = 0.15
     _last_preflight_text: str = field(default="", init=False, repr=False)
     _last_preflight_at: float = field(default=0.0, init=False, repr=False)
 
@@ -45,9 +45,9 @@ class PartialSttPreemptivePolicy:
     def from_env(cls) -> PartialSttPreemptivePolicy:
         return cls(
             enabled=partial_stt_preemptive_enabled(),
-            min_chars=_env_int("VOICE_AGENT_PARTIAL_STT_MIN_CHARS", 8),
-            min_growth_chars=_env_int("VOICE_AGENT_PARTIAL_STT_MIN_GROWTH_CHARS", 4),
-            min_interval_s=_env_int("VOICE_AGENT_PARTIAL_STT_MIN_INTERVAL_MS", 250) / 1000.0,
+            min_chars=_env_int("VOICE_AGENT_PARTIAL_STT_MIN_CHARS", 6),
+            min_growth_chars=_env_int("VOICE_AGENT_PARTIAL_STT_MIN_GROWTH_CHARS", 3),
+            min_interval_s=_env_int("VOICE_AGENT_PARTIAL_STT_MIN_INTERVAL_MS", 150) / 1000.0,
         )
 
     def reset(self) -> None:

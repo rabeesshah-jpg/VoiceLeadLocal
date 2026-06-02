@@ -48,11 +48,22 @@ from agent.pipeline.vad_silero import build_silero_vad
 from agent.observability.latency import TtsCallTiming, TurnLatency
 from agent.observability.pipeline_events import log_pipeline_event, tts_stream_mode_label
 from agent.observability.pipeline_latency import TurnPipelineTracker
+from agent.observability.streaming_audit import log_streaming_audit
+from agent.pipeline.user_turn_streaming import (
+    TurnCommitController,
+    barge_in_enabled,
+)
 from agent.prompts import get_voice_agent_instructions, normalize_language
 from agent.pipeline.llm_openrouter import build_openrouter_llm
-from agent.pipeline.stt_deepgram import build_deepgram_stt, resolve_deepgram_stt
+from agent.pipeline.stt_config import is_deepgram_provider, is_faster_whisper_provider
+from agent.pipeline.stt_transcript_utils import (
+    clean_transcript,
+    transcript_extends_prior,
+    validate_final_transcript,
+)
+from agent.pipeline.stt_factory import build_stt, get_stt_provider, resolve_stt_log_fields
 from agent.pipeline.stt_http_pool import ensure_stt_http_session
-from agent.pipeline.stt_warmup import warmup_deepgram_stt
+from agent.pipeline.stt_warmup import warmup_stt
 from agent.pipeline.user_stt_router import (
     default_user_stt_language,
     dominant_user_script,
@@ -169,17 +180,15 @@ def _build_session(
         if vad is None:
             vad = build_silero_vad()
 
-    dg_model, dg_lang = resolve_deepgram_stt(language)
+    stt_fields = resolve_stt_log_fields(language)
     with StepTimer(
         logger,
         operation,
-        "init_deepgram_stt",
-        model=dg_model,
-        language=dg_lang,
+        "init_stt",
         app_language=normalize_language(language),
-        stt_language=dg_lang,
+        **stt_fields,
     ):
-        stt = build_deepgram_stt(language, http_session=stt_http_session)
+        stt = build_stt(language, http_session=stt_http_session)
 
     aec_warmup = _env_float("VOICE_AGENT_AEC_WARMUP_S", 1.0)
     llm_model = _env("VOICE_AGENT_LLM_MODEL", "openai/gpt-4o-mini")
@@ -213,6 +222,12 @@ def _build_session(
         )
 
     with StepTimer(logger, operation, "assemble_agent_session"):
+        # Faster-whisper finals are debounced in entrypoint; preemptive LLM causes
+        # duplicate/early requests before STT is stable.
+        preemptive_llm = _env_bool("VOICE_AGENT_PREEMPTIVE_GENERATION", True)
+        if is_faster_whisper_provider():
+            preemptive_llm = _env_bool("VOICE_AGENT_PREEMPTIVE_GENERATION", False)
+        preemptive_tts = _env_bool("VOICE_AGENT_PREEMPTIVE_TTS", preemptive_llm)
         # Use VAD interruptions — adaptive mode needs LiveKit inference WS and
         # often times out locally (408), which previously triggered a long apology TTS.
         session = AgentSession(
@@ -233,14 +248,14 @@ def _build_session(
                     "max_delay": _env_float("VOICE_AGENT_MAX_ENDPOINTING_DELAY", 1.0),
                 },
                 "preemptive_generation": {
-                    "enabled": _env_bool("VOICE_AGENT_PREEMPTIVE_GENERATION", True),
-                    "preemptive_tts": _env_bool("VOICE_AGENT_PREEMPTIVE_TTS", True),
+                    "enabled": preemptive_llm,
+                    "preemptive_tts": preemptive_tts,
                     "max_retries": _env_int("VOICE_AGENT_PREEMPTIVE_MAX_RETRIES", 10),
                 },
             },
             allow_interruptions=True,
             min_interruption_duration=0.2,
-            preemptive_generation=_env_bool("VOICE_AGENT_PREEMPTIVE_GENERATION", True),
+            preemptive_generation=preemptive_llm,
             min_endpointing_delay=_env_float("VOICE_AGENT_MIN_ENDPOINTING_DELAY", 0.20),
             max_endpointing_delay=_env_float("VOICE_AGENT_MAX_ENDPOINTING_DELAY", 1.0),
         )
@@ -260,10 +275,14 @@ async def entrypoint(ctx: JobContext):
 
     publisher = DataChannelPublisher(room)
     latency_holder: list[TurnLatency] = [TurnLatency()]
-    pipeline_holder: list[TurnPipelineTracker] = [TurnPipelineTracker()]
-    pipeline_holder[0].reset_turn(room=room_name)
+    pipeline_holder: list[TurnPipelineTracker] = [TurnPipelineTracker(room=room_name)]
     user_turn_seq: list[int] = [0]
     user_utterance_open: list[bool] = [False]
+    vad_speech_active: list[bool] = [False]
+    user_final_committed_turns: set[int] = set()
+    turn_commit_holder: list[TurnCommitController] = [TurnCommitController()]
+    llm_dispatch_logged: set[str] = set()
+    last_llm_turn_seq: list[int] = [0]
     stt_segment_parts: list[str] = []
     user_stt_lang_holder: list[str] = ["en-US"]
     greeting_complete: list[bool] = [False]
@@ -274,12 +293,17 @@ async def entrypoint(ctx: JobContext):
 
     def _on_llm_first_token() -> None:
         latency_holder[0].mark_llm_first_token()
-        log_pipeline_event(
-            "LLM_FIRST_TOKEN",
-            room=room_name,
-            turn_id=latency_holder[0].turn_id,
-            source="turn_latency_callback",
-        )
+        pipeline_holder[0].mark_llm_first_token()
+
+    def _on_llm_metrics_collected(metrics: object) -> None:
+        from livekit.agents.metrics import LLMMetrics
+
+        if isinstance(metrics, LLMMetrics):
+            pipeline_holder[0].record_llm_usage(
+                prompt_tokens=metrics.prompt_tokens,
+                completion_tokens=metrics.completion_tokens,
+                total_tokens=metrics.total_tokens,
+            )
 
     def _publish_llm_start_milestone() -> None:
         ms = latency_holder[0].llm_start_ms()
@@ -288,7 +312,7 @@ async def entrypoint(ctx: JobContext):
 
         async def _publish_milestone() -> None:
             await publisher.llm_start(
-                turn_id=latency_holder[0].turn_id,
+                turn_id=pipeline_holder[0].turn_id,
                 llm_start_ms=ms,
             )
 
@@ -356,7 +380,15 @@ async def entrypoint(ctx: JobContext):
 
     prewarmed_vad = ctx.proc.userdata.get("vad")
     stt_http = await ensure_stt_http_session()
-    agent_session, deepgram_stt = _build_session(
+    llm_model = _env("VOICE_AGENT_LLM_MODEL", "openai/gpt-4o-mini")
+    pipeline_holder[0].configure_providers(
+        stt_provider=get_stt_provider(),
+        tts_provider=get_tts_provider(),
+        tts_voice=tts_voice,
+        llm_model=llm_model,
+    )
+
+    agent_session, active_stt = _build_session(
         tts_config,
         language=language,
         on_tts_timing=_on_tts_timing,
@@ -365,12 +397,31 @@ async def entrypoint(ctx: JobContext):
         vad=prewarmed_vad,
         stt_http_session=stt_http,
     )
+    if hasattr(active_stt, "bind_performance_tracker"):
+        active_stt.bind_performance_tracker(pipeline_holder[0])
+    if hasattr(active_stt, "bind_committed_final_ref"):
+        active_stt.bind_committed_final_ref(turn_commit_holder[0].committed_final_ref)
 
-    async def _warmup_stt() -> dict:
-        with StepTimer(logger, operation, "deepgram_stt_warmup", room=room_name):
-            result = await warmup_deepgram_stt(deepgram_stt)
+    if barge_in_enabled():
+        log_streaming_audit("barge_in_listening_enabled", room=room_name)
+
+    agent_session.llm.on("metrics_collected", _on_llm_metrics_collected)
+
+    async def _warmup_stt_job() -> dict:
+        with StepTimer(
+            logger,
+            operation,
+            "stt_warmup",
+            room=room_name,
+            stt_provider=get_stt_provider(),
+        ):
+            result = await warmup_stt(
+                active_stt,
+                language=language,
+                http_session=stt_http,
+            )
             if not result.get("ok") and not result.get("skipped"):
-                logger.warning("Deepgram STT warmup in job failed: %s", result)
+                logger.warning("STT warmup in job failed: %s", result)
             return result
 
     async def _warmup_tts() -> dict:
@@ -390,7 +441,7 @@ async def entrypoint(ctx: JobContext):
         participant, _warmup_tts_res, _warmup_stt_res = await asyncio.gather(
             ctx.wait_for_participant(),
             _warmup_tts(),
-            _warmup_stt(),
+            _warmup_stt_job(),
         )
     log_block(
         logger,
@@ -401,6 +452,48 @@ async def entrypoint(ctx: JobContext):
         room=room_name,
         participant_identity=participant.identity,
     )
+    stt_sample_rate = int(_env("VOICE_AGENT_STT_SAMPLE_RATE", "16000") or "16000")
+    room_options = room_io.RoomOptions(
+        participant_identity=participant.identity,
+        audio_input=resolve_audio_input_options(sample_rate=stt_sample_rate),
+    )
+
+    def _open_user_turn(turn_seq: int) -> str:
+        turn_id = pipeline_holder[0].begin_pipeline_turn(turn_seq=turn_seq)
+        latency_holder[0].turn_id = turn_id
+        return turn_id
+
+    def _ensure_user_utterance_open(*, from_vad: bool = False) -> None:
+        """Open a pipeline turn for the current user speech segment."""
+        if user_utterance_open[0]:
+            return
+        if from_vad or not vad_speech_active[0]:
+            user_turn_seq[0] += 1
+        elif user_turn_seq[0] <= 0:
+            user_turn_seq[0] = 1
+        user_utterance_open[0] = True
+        if not pipeline_holder[0].turn_id:
+            _open_user_turn(user_turn_seq[0])
+
+    def _on_vad_speech_start() -> None:
+        if not greeting_complete[0]:
+            return
+        vad_speech_active[0] = True
+        _ensure_user_utterance_open(from_vad=True)
+
+    def _on_vad_speech_end() -> None:
+        if not greeting_complete[0]:
+            return
+        vad_speech_active[0] = False
+        pipeline = pipeline_holder[0]
+        if (
+            pipeline.turn_id
+            and pipeline.t_user_speech_start is not None
+            and pipeline.t_stt_final is None
+        ):
+            pipeline.emit_stt_latency_summary()
+        user_utterance_open[0] = False
+
     agent = VoiceAgent(
         instructions=instructions,
         language=language,
@@ -408,13 +501,10 @@ async def entrypoint(ctx: JobContext):
         publisher=publisher,
         pipeline_tracker=pipeline_holder[0],
         on_llm_first_token=_on_llm_first_token,
+        on_vad_speech_start=_on_vad_speech_start,
+        on_vad_speech_end=_on_vad_speech_end,
         greeting_complete=greeting_complete,
         room=room_name,
-    )
-    stt_sample_rate = int(_env("VOICE_AGENT_STT_SAMPLE_RATE", "16000") or "16000")
-    room_options = room_io.RoomOptions(
-        participant_identity=participant.identity,
-        audio_input=resolve_audio_input_options(sample_rate=stt_sample_rate),
     )
 
     def _route_user_stt_language(display_text: str) -> None:
@@ -429,7 +519,12 @@ async def entrypoint(ctx: JobContext):
             return
         prev_lang = user_stt_lang_holder[0]
         user_stt_lang_holder[0] = next_lang
-        deepgram_stt.update_options(language=next_lang)
+        if hasattr(active_stt, "update_options"):
+            if is_deepgram_provider():
+                active_stt.update_options(language=next_lang)
+            else:
+                fw_lang = "ar" if next_lang.startswith("ar") else "en"
+                active_stt.update_options(language=fw_lang)
         if prev_lang == "en-US" and next_lang == "ar-SA" and stt_segment_parts:
             if dominant_user_script("".join(stt_segment_parts)) != "arabic":
                 stt_segment_parts.clear()
@@ -447,36 +542,210 @@ async def entrypoint(ctx: JobContext):
             text_preview=display_text[:80],
         )
 
+    async def _commit_final_turn(
+        *,
+        full_text: str,
+        turn_seq: int,
+        generation: int,
+    ) -> None:
+        turn_commit = turn_commit_holder[0]
+        pipeline = pipeline_holder[0]
+
+        if generation != turn_commit._commit_generation:
+            return
+        if pipeline.turn_seq != turn_seq:
+            return
+
+        pipeline_turn_id = pipeline.turn_id
+        display_text = clean_transcript(full_text)
+        delta_text = turn_commit.delta_from_incoming(display_text)
+        if not delta_text.strip():
+            log_pipeline_event(
+                "STT_DUPLICATE_FINAL_IGNORED",
+                room=room_name,
+                turn_id=pipeline_turn_id,
+                turn_seq=turn_seq,
+                reason="empty_delta_after_prefix",
+                raw_chars=len(display_text),
+            )
+            return
+
+        log_pipeline_event(
+            "STT_FINAL_DELTA_EXTRACTED",
+            room=room_name,
+            turn_id=pipeline_turn_id,
+            turn_seq=turn_seq,
+            raw_chars=len(display_text),
+            final_chars=len(delta_text),
+        )
+
+        ok_send, dup_reason = turn_commit.should_send_final(delta_text)
+        if not ok_send:
+            log_pipeline_event(
+                "STT_DUPLICATE_FINAL_IGNORED",
+                room=room_name,
+                turn_id=pipeline_turn_id,
+                turn_seq=turn_seq,
+                reason=dup_reason,
+                text_preview=delta_text[:80],
+            )
+            return
+
+        ok, reject_reason = validate_final_transcript(delta_text)
+        if not ok:
+            pipeline.mark_transcript_rejected(
+                reason=reject_reason, transcript_preview=delta_text
+            )
+            pipeline.reset_turn(room=room_name, phase="full")
+            if not vad_speech_active[0]:
+                user_utterance_open[0] = False
+            return
+
+        if not turn_commit.allow_llm_request(
+            turn_seq=turn_seq, pipeline_turn_id=pipeline_turn_id, room=room_name
+        ):
+            return
+
+        if latency_holder[0].t_speech_end is None and _env_bool(
+            "VOICE_AGENT_LATENCY_SYNTHETIC_SPEECH_END", False
+        ):
+            latency_holder[0].mark_speech_end()
+        latency_holder[0].mark_stt_final()
+
+        pipeline.mark_stt_final(transcript_preview=delta_text)
+        pipeline.emit_stt_latency_summary()
+        pipeline.reset_turn(room=room_name, phase="llm")
+        latency_holder[0].turn_id = pipeline.turn_id
+
+        turn_commit.record_committed_final(display_text)
+        turn_commit.record_sent_final(delta_text)
+        user_final_committed_turns.add(turn_seq)
+
+        log_pipeline_event(
+            "USER_FINAL_TRANSCRIPT",
+            room=room_name,
+            turn_id=pipeline_turn_id,
+            turn_seq=turn_seq,
+            text_preview=delta_text[:80],
+            tts_mode=tts_stream_mode_label(),
+        )
+
+        await publisher.agent_state("thinking")
+        log_pipeline_event(
+            "AGENT_STATE_THINKING",
+            room=room_name,
+            turn_id=pipeline_turn_id,
+            turn_seq=turn_seq,
+            reason="user_final_transcript_stable",
+        )
+
+        prime_ui = (
+            "…"
+            if user_ui_english_enabled() and needs_english_ui_translation(delta_text)
+            else delta_text.strip()
+        )
+        log_pipeline_event(
+            "TRANSCRIPT_SENT_TO_UI",
+            room=room_name,
+            turn_id=pipeline_turn_id,
+            turn_seq=turn_seq,
+            text_preview=prime_ui[:120],
+            is_final=True,
+        )
+        await publisher.user_transcript(
+            prime_ui,
+            is_final=True,
+            message_id=str(uuid.uuid4()),
+            turn_seq=turn_seq,
+        )
+
+        ui_text = delta_text.strip()
+        if user_ui_english_enabled() and needs_english_ui_translation(delta_text):
+            ui_text = await translate_to_english(delta_text)
+        if ui_text.strip() and ui_text.strip() != prime_ui.strip():
+            await publisher.user_transcript(
+                ui_text,
+                is_final=True,
+                message_id=str(uuid.uuid4()),
+                turn_seq=turn_seq,
+            )
+
+        stt_snapshot = pipeline.build_stt_metrics()
+        log_pipeline_event(
+            "TRANSCRIPT_SENT_TO_LLM",
+            room=room_name,
+            turn_id=pipeline_turn_id,
+            turn_seq=turn_seq,
+            text_preview=ui_text[:120],
+            stt_speech_end_to_final_ms=stt_snapshot.get("stt_speech_end_to_final_ms"),
+            stt_wall_ms=stt_snapshot.get("stt_wall_ms"),
+            stt_partial_count=stt_snapshot.get("stt_partial_count"),
+            stt_provider=stt_snapshot.get("stt_provider"),
+        )
+
+        turn_commit.mark_llm_started(
+            turn_seq=turn_seq, pipeline_turn_id=pipeline_turn_id
+        )
+        last_llm_turn_seq[0] = turn_seq
+        if pipeline_turn_id not in llm_dispatch_logged:
+            llm_dispatch_logged.add(pipeline_turn_id)
+            pipeline.mark_llm_dispatch()
+            latency_holder[0].mark_llm_dispatch()
+            log_pipeline_event(
+                "LLM_START",
+                room=room_name,
+                turn_id=pipeline_turn_id,
+                turn_seq=turn_seq,
+                tts_mode=tts_stream_mode_label(),
+            )
+            _publish_llm_start_milestone()
+
+        await log_call_event(
+            room_name,
+            "user_transcript",
+            {"text": ui_text[:500], "stt_raw": display_text[:500], "stt_delta": delta_text[:500]},
+        )
+        stt_segment_parts.clear()
+        if not vad_speech_active[0]:
+            user_utterance_open[0] = False
+        log_pipeline_event(
+            "TURN_BUFFER_CLEARED",
+            room=room_name,
+            turn_id=pipeline_turn_id,
+            turn_seq=turn_seq,
+        )
+
     @agent_session.on("user_input_transcribed")
     def on_transcript(ev: UserInputTranscribedEvent):
         import asyncio
 
         if ev.is_final:
-            latency_holder[0].mark_stt_final()
-            if ev.transcript.strip():
-                stt_segment_parts[:] = merge_stt_segment(
-                    stt_segment_parts, ev.transcript
-                )
+            cleaned_final = clean_transcript(ev.transcript)
+            if cleaned_final:
+                if is_faster_whisper_provider():
+                    stt_segment_parts[:] = [cleaned_final]
+                else:
+                    stt_segment_parts[:] = merge_stt_segment(
+                        stt_segment_parts, cleaned_final
+                    )
 
         async def _handle():
             if not greeting_complete[0]:
                 return
 
             component = "STT"
-            display_text = joined_transcript(
-                stt_segment_parts,
-                interim="" if ev.is_final else ev.transcript,
-            )
             if ev.is_final:
-                pipeline_holder[0].reset_turn(room=room_name)
-                pipeline_holder[0].mark_stt_final(transcript_preview=display_text)
-                log_pipeline_event(
-                    "USER_FINAL_TRANSCRIPT",
-                    room=room_name,
-                    turn_id=pipeline_holder[0].turn_id,
-                    text_preview=display_text[:80],
-                    tts_mode=tts_stream_mode_label(),
+                display_text = clean_transcript(
+                    joined_transcript(stt_segment_parts, interim="")
                 )
+            else:
+                display_text = clean_transcript(ev.transcript)
+            if not display_text.strip():
+                return
+
+            _ensure_user_utterance_open()
+
+            if ev.is_final:
                 log_block(
                     logger,
                     logging.INFO,
@@ -488,10 +757,13 @@ async def entrypoint(ctx: JobContext):
                     is_final=True,
                 )
             else:
+                pipeline_holder[0].record_stt_partial(text_preview=display_text)
                 log_pipeline_event(
                     "STT_PARTIAL_TRANSCRIPT",
                     room=room_name,
                     turn_id=pipeline_holder[0].turn_id,
+                    turn_seq=user_turn_seq[0],
+                    stt_partial_count=pipeline_holder[0].stt_partial_count,
                     text_preview=display_text[:80],
                 )
                 log_block(
@@ -504,96 +776,134 @@ async def entrypoint(ctx: JobContext):
                     text=display_text[:120],
                     is_final=False,
                 )
-            if display_text.strip():
-                if (
-                    normalize_language(language) == "ar"
-                    and is_likely_mistranscribed_for_ar_call(display_text)
-                ):
+
+            turn_commit = turn_commit_holder[0]
+            pipeline_turn_id = pipeline_holder[0].turn_id
+            current_turn_seq = user_turn_seq[0]
+            raw_full = clean_transcript(
+                joined_transcript(stt_segment_parts, interim="")
+                if ev.is_final
+                else display_text
+            )
+            delta_text = turn_commit.delta_from_incoming(raw_full)
+            if not delta_text.strip():
+                delta_text = clean_transcript(ev.transcript)
+
+            if (
+                normalize_language(language) == "ar"
+                and is_likely_mistranscribed_for_ar_call(raw_full)
+            ):
+                stt_segment_parts.clear()
+                if user_stt_lang_holder[0] != "ar-SA":
+                    user_stt_lang_holder[0] = "ar-SA"
+                    if is_deepgram_provider() and hasattr(active_stt, "update_options"):
+                        active_stt.update_options(language="ar-SA")
+                pipeline_holder[0].emit_stt_latency_summary()
+                pipeline_holder[0].reset_turn(room=room_name, phase="full")
+                log_block(
+                    logger,
+                    logging.WARNING,
+                    operation="STT",
+                    step="skip_mistranscribed_user_text",
+                    status="SKIP",
+                    room=room_name,
+                    text_preview=raw_full[:80],
+                )
+                return
+
+            _route_user_stt_language(raw_full)
+            if (
+                not ev.is_final
+                and normalize_language(language) == "ar"
+                and user_stt_lang_holder[0] == "en-US"
+                and dominant_user_script(raw_full) == "latin"
+                and stt_segment_parts
+            ):
+                prev = dominant_user_script(joined_transcript(stt_segment_parts, interim=""))
+                if prev not in ("latin", "unknown"):
                     stt_segment_parts.clear()
-                    if user_stt_lang_holder[0] != "ar-SA":
-                        user_stt_lang_holder[0] = "ar-SA"
-                        deepgram_stt.update_options(language="ar-SA")
-                    log_block(
-                        logger,
-                        logging.WARNING,
-                        operation="STT",
-                        step="skip_mistranscribed_user_text",
-                        status="SKIP",
-                        room=room_name,
-                        text_preview=display_text[:80],
-                    )
-                    return
 
-                _route_user_stt_language(display_text)
-                if (
-                    not ev.is_final
-                    and normalize_language(language) == "ar"
-                    and user_stt_lang_holder[0] == "en-US"
-                    and dominant_user_script(display_text) == "latin"
-                    and stt_segment_parts
-                ):
-                    # ar-SA can emit Arabic script for English; prefer fresh en-US segments.
-                    prev = dominant_user_script(joined_transcript(stt_segment_parts, interim=""))
-                    if prev not in ("latin", "unknown"):
-                        stt_segment_parts.clear()
+            if ev.is_final:
+                turn_seq = current_turn_seq
 
-                if ev.is_final:
-                    if not user_utterance_open[0]:
-                        user_turn_seq[0] += 1
-                        user_utterance_open[0] = True
-                    turn_seq = user_turn_seq[0]
-
-                    # Publish final user line before translation so the UI turn exists
-                    # before llm_response events (translation can lag agent reply).
-                    prime_ui = (
-                        "…"
-                        if user_ui_english_enabled()
-                        and needs_english_ui_translation(display_text)
-                        else display_text.strip()
-                    )
-                    await publisher.user_transcript(
-                        prime_ui,
-                        is_final=True,
-                        message_id=str(uuid.uuid4()),
-                        turn_seq=turn_seq,
-                    )
-
-                    ui_text = display_text.strip()
-                    if user_ui_english_enabled() and needs_english_ui_translation(
-                        display_text
+                if turn_seq in user_final_committed_turns:
+                    if transcript_extends_prior(
+                        turn_commit.last_committed_final, raw_full
                     ):
-                        ui_text = await translate_to_english(display_text)
-                    if ui_text.strip() and ui_text.strip() != prime_ui.strip():
-                        await publisher.user_transcript(
-                            ui_text,
-                            is_final=True,
-                            message_id=str(uuid.uuid4()),
+                        log_pipeline_event(
+                            "STT_FINAL_SUPERSEDES_PRIOR",
+                            room=room_name,
+                            turn_id=pipeline_turn_id,
                             turn_seq=turn_seq,
+                            prior_preview=turn_commit.last_committed_final[:80],
+                            text_preview=raw_full[:80],
                         )
+                        turn_commit.cancel_pending_commit(
+                            reason="superseded_final",
+                            turn_id=pipeline_turn_id,
+                            room=room_name,
+                        )
+                        user_final_committed_turns.discard(turn_seq)
+                    else:
+                        log_pipeline_event(
+                            "DUPLICATE_FINAL_TRANSCRIPT_DROPPED",
+                            room=room_name,
+                            turn_id=pipeline_turn_id,
+                            turn_seq=turn_seq,
+                            text_preview=raw_full[:80],
+                        )
+                        return
 
-                    await log_call_event(
-                        room_name,
-                        "user_transcript",
-                        {"text": ui_text[:500], "stt_raw": display_text[:500]},
-                    )
-                    return
-
-                if not user_utterance_open[0]:
-                    user_turn_seq[0] += 1
-                    user_utterance_open[0] = True
-
-                ui_text = await user_message_for_ui(
-                    display_text,
-                    is_final=False,
+                turn_commit.schedule_final_commit(
+                    turn_id=pipeline_turn_id,
+                    room=room_name,
+                    turn_seq=turn_seq,
+                    full_text=raw_full,
+                    commit_fn=lambda **kw: _commit_final_turn(
+                        full_text=kw["full_text"],
+                        turn_seq=kw["turn_seq"],
+                        generation=kw["generation"],
+                    ),
                 )
-                if ui_text is None:
-                    return
+                return
 
-                await publisher.user_transcript(
-                    ui_text,
-                    is_final=False,
+            if not delta_text.strip():
+                log_pipeline_event(
+                    "STT_DUPLICATE_FINAL_IGNORED",
+                    room=room_name,
+                    turn_id=pipeline_turn_id,
                     turn_seq=user_turn_seq[0],
+                    reason="empty_partial_delta",
+                    raw_chars=len(raw_full),
                 )
+                return
+
+            log_pipeline_event(
+                "STT_DELTA_EXTRACTED",
+                room=room_name,
+                turn_id=pipeline_turn_id,
+                turn_seq=current_turn_seq,
+                raw_chars=len(raw_full),
+                delta_chars=len(delta_text),
+            )
+
+            ui_text = await user_message_for_ui(delta_text, is_final=False)
+            if ui_text is None:
+                return
+
+            log_pipeline_event(
+                "TRANSCRIPT_SENT_TO_UI",
+                room=room_name,
+                turn_id=pipeline_turn_id,
+                turn_seq=current_turn_seq,
+                text_preview=(ui_text or "")[:120],
+                is_final=False,
+            )
+            await publisher.user_transcript(
+                ui_text,
+                is_final=False,
+                turn_seq=current_turn_seq,
+            )
 
         asyncio.create_task(_handle())
 
@@ -601,9 +911,24 @@ async def entrypoint(ctx: JobContext):
     def on_agent_state(ev: AgentStateChangedEvent):
         import asyncio
 
+        def _pipeline_response_active() -> bool:
+            p = pipeline_holder[0]
+            return p.t_llm_dispatch is not None and p.t_playback_complete is None
+
         async def _handle():
             state = ev.new_state
             old = ev.old_state
+            pipeline = pipeline_holder[0]
+            pipeline_turn_id = pipeline.turn_id
+            agent_internal_turn_id = latency_holder[0].turn_id
+
+            log_streaming_audit(
+                "agent_state_transition",
+                turn_id=pipeline_turn_id,
+                room=room_name,
+                from_state=old,
+                to_state=state,
+            )
             log_block(
                 logger,
                 logging.INFO,
@@ -613,28 +938,71 @@ async def entrypoint(ctx: JobContext):
                 room=room_name,
                 from_state=old,
                 to_state=state,
+                turn_id=pipeline_turn_id,
+                agent_internal_turn_id=agent_internal_turn_id,
             )
+
+            natural_turn_end = state == "listening" and old == "speaking"
+            if (
+                state == "listening"
+                and not natural_turn_end
+                and _pipeline_response_active()
+                and not barge_in_enabled()
+            ):
+                log_streaming_audit(
+                    "agent_state_listening_suppressed",
+                    turn_id=pipeline_turn_id,
+                    room=room_name,
+                    from_state=old,
+                    to_state=state,
+                )
+                return
+
             if state == "interrupted" or (state == "thinking" and old == "speaking"):
                 await publisher.llm_playback_end(interrupted=True)
             if state == "thinking":
                 stt_segment_parts.clear()
-                user_utterance_open[0] = False
-                pipeline_holder[0].mark_llm_dispatch()
-                latency_holder[0].mark_llm_dispatch()
-                log_pipeline_event(
-                    "LLM_START",
-                    room=room_name,
-                    turn_id=latency_holder[0].turn_id,
-                    pipeline_turn_id=pipeline_holder[0].turn_id,
-                    tts_mode=tts_stream_mode_label(),
-                )
-                _publish_llm_start_milestone()
+                if not vad_speech_active[0]:
+                    user_utterance_open[0] = False
+                stt_final_ready = pipeline._snap_stt_final is not None
+                if not stt_final_ready:
+                    log_pipeline_event(
+                        "LLM_START_BLOCKED_UNTIL_FINAL",
+                        room=room_name,
+                        turn_id=pipeline_turn_id,
+                        turn_seq=pipeline.turn_seq,
+                    )
+                elif pipeline_turn_id not in llm_dispatch_logged:
+                    llm_dispatch_logged.add(pipeline_turn_id)
+                    pipeline.mark_llm_dispatch()
+                    latency_holder[0].mark_llm_dispatch()
+                    if agent_internal_turn_id != pipeline_turn_id:
+                        latency_holder[0].turn_id = pipeline_turn_id
+                    log_pipeline_event(
+                        "LLM_START",
+                        room=room_name,
+                        turn_id=pipeline_turn_id,
+                        turn_seq=pipeline.turn_seq,
+                        agent_internal_turn_id=agent_internal_turn_id,
+                        tts_mode=tts_stream_mode_label(),
+                    )
+                    _publish_llm_start_milestone()
             if state == "speaking":
                 latency_holder[0].mark_audio_out()
-            if state == "listening" and old == "speaking":
+            if natural_turn_end:
+                user_final_committed_turns.clear()
+                turn_commit = turn_commit_holder[0]
+                turn_commit.llm_started_turn_seqs.clear()
+                turn_commit.llm_dispatched_pipeline_turn_ids.clear()
+                if turn_commit.last_sent_final_ref is not None:
+                    turn_commit.last_sent_final_ref[0] = ""
+                llm_dispatch_logged.clear()
                 await publisher.llm_playback_end()
-                pipeline_holder[0].log_turn_once()
-                payload = latency_holder[0].to_payload()
+                pipeline.mark_playback_complete()
+                perf_summary = pipeline.build_summary()
+                pipeline.log_turn_summary()
+                pipeline.close_pipeline_turn()
+                payload = latency_holder[0].to_payload(pipeline_summary=perf_summary)
                 log_block(
                     logger,
                     logging.INFO,
@@ -642,14 +1010,30 @@ async def entrypoint(ctx: JobContext):
                     step="turn_complete",
                     status="OK",
                     room=room_name,
+                    turn_id=pipeline_turn_id,
                     **{k: v for k, v in payload.items() if v is not None},
                 )
                 await publisher.latency(payload)
                 await log_call_event(room_name, "latency", payload)
                 latency_holder[0] = TurnLatency()
-                pipeline_holder[0].reset_turn(room=room_name)
+                pipeline.reset_turn(room=room_name)
             if state == "listening" and not greeting_complete[0]:
                 return
+
+            if state == "listening":
+                log_pipeline_event(
+                    "AGENT_STATE_LISTENING",
+                    room=room_name,
+                    turn_id=pipeline_turn_id,
+                    from_state=old,
+                )
+            elif state == "thinking":
+                log_pipeline_event(
+                    "AGENT_STATE_THINKING",
+                    room=room_name,
+                    turn_id=pipeline_turn_id,
+                    from_state=old,
+                )
 
             await publisher.agent_state(state)
             await log_call_event(room_name, "agent_state", {"state": state, "old_state": old})
@@ -668,6 +1052,8 @@ async def entrypoint(ctx: JobContext):
             if text and text == greeting_text:
                 return
             if text:
+                pipeline_holder[0].assistant_response_length = len(text)
+                pipeline_holder[0].mark_llm_complete(response_length=len(text))
                 log_block(
                     logger,
                     logging.INFO,
@@ -676,6 +1062,7 @@ async def entrypoint(ctx: JobContext):
                     status="OK",
                     room=room_name,
                     text=text[:200],
+                    response_length=len(text),
                 )
                 await publisher.llm_response(text, is_final=True)
 
@@ -777,7 +1164,10 @@ def _startup_provider_checks():
         operation="WORKER",
         step="env_keys_present",
         status="CHECK",
-        deepgram=bool(_env("DEEPGRAM_API_KEY")),
+        stt_provider=get_stt_provider(),
+        stt_ws_url=_env("STT_WS_URL") or "derived_from_STT_BASE_URL",
+        deepgram_enabled=is_deepgram_provider(),
+        deepgram_key_set=bool(_env("DEEPGRAM_API_KEY")),
         openrouter=bool(_env("OPENROUTER_API_KEY")),
         tts_base_url=_env("TTS_BASE_URL") or _env("CHATTERBOX_TTS_URL") or "default",
         tts_provider=get_tts_provider(),

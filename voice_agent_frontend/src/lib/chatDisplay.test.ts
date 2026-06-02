@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatChatDisplayText } from './chatDisplay';
+import { formatChatDisplayText, formatUserChatDisplayText } from './chatDisplay';
 import { appendUserMessage } from './llmTranscript';
 
 describe('formatChatDisplayText', () => {
@@ -7,6 +7,37 @@ describe('formatChatDisplayText', () => {
     expect(formatChatDisplayText('Hi <breath>, how are you?')).toBe('Hi, how are you?');
     expect(formatChatDisplayText('Well [sigh] ok <laugh>')).toBe('Well ok');
     expect(formatChatDisplayText('[clear throat] One moment')).toBe('One moment');
+  });
+});
+
+describe('formatUserChatDisplayText', () => {
+  it('removes bracket STT artifacts', () => {
+    expect(
+      formatUserChatDisplayText(
+        'I want a bit completely commercialized. [BLANK_AUDIO]',
+      ),
+    ).toBe('I want a bit completely commercialized.');
+  });
+
+  it('removes parenthetical paralinguistics', () => {
+    expect(formatUserChatDisplayText('My name is Omar. (laughs)')).toBe(
+      'My name is Omar.',
+    );
+  });
+
+  it('removes common hallucination phrases', () => {
+    expect(formatUserChatDisplayText('Thanks for watching.')).toBe('');
+  });
+
+  it('removes trailing filler fragments', () => {
+    expect(
+      formatUserChatDisplayText(
+        'I want to build a website, can you help me in this? No.',
+      ),
+    ).toBe('I want to build a website, can you help me in this?');
+    expect(formatUserChatDisplayText("I'm in Dubai. - Yeah.")).toBe(
+      "I'm in Dubai.",
+    );
   });
 });
 

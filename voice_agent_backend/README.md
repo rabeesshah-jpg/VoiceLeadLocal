@@ -15,7 +15,7 @@ Standalone Django API + LiveKit agent worker for ultra-low-latency voice convers
 cd voice_agent_backend
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # fill LIVEKIT_*, DEEPGRAM_*, OPENROUTER_*, TTS_BASE_URL
+cp .env.example .env   # fill LIVEKIT_*, STT_PROVIDER + STT_WS_URL (or DEEPGRAM_*), OPENROUTER_*, TTS_BASE_URL
 python manage.py migrate
 python manage.py runserver 8001
 ```

@@ -1,14 +1,21 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Room } from 'livekit-client';
 import { RoomEvent } from 'livekit-client';
 import { log } from '../lib/logger';
 import {
-  applyAssistantTranscript,
-  applyUserTranscript,
+  buildUserFinalDedupeKey,
+  clearActiveUserTurn,
+  createUserTranscriptSession,
+  discardOpenUserDraft,
   finishAssistantStreaming,
+  recordUserFinalCommit,
   removeIncompleteAssistant,
+  shouldSkipUserFinalCommit,
   turnsToBubbles,
+  upsertAssistantTranscript,
+  upsertUserTranscript,
   type ChatTurn,
+  type UserTranscriptSession,
 } from '../lib/chatTurns';
 import type { ChatBubble } from '../lib/chatTurns';
 import {
@@ -78,17 +85,28 @@ const initial: TranscriptState = {
   turnMetrics: initialTurnLatencyMetrics,
 };
 
+function transcriptLog(step: string, detail?: Record<string, unknown>) {
+  console.log('[VoiceAgent]', step, detail ?? '');
+}
+
 export function useAgentDataChannel() {
   const [state, setState] = useState<TranscriptState>(initial);
 
   const turnsRef = useRef<ChatTurn[]>([]);
-  const seenUserMessageIdsRef = useRef<Set<string>>(new Set());
+  const userSessionRef = useRef<UserTranscriptSession>(createUserTranscriptSession());
+  const seenUserFinalKeysRef = useRef<Set<string>>(new Set());
+  const recentUserFinalAtRef = useRef<Map<string, number>>(new Map());
   const primaryAgentRef = useRef<string | null>(null);
   const boundRoomNameRef = useRef<string | null>(null);
+  const dataHandlerRef = useRef<
+    (payload: Uint8Array, identity: string) => void
+  >(() => {});
 
   const reset = useCallback(() => {
     turnsRef.current = [];
-    seenUserMessageIdsRef.current.clear();
+    userSessionRef.current = createUserTranscriptSession();
+    seenUserFinalKeysRef.current.clear();
+    recentUserFinalAtRef.current.clear();
     primaryAgentRef.current = null;
     boundRoomNameRef.current = null;
     setState(initial);
@@ -103,7 +121,10 @@ export function useAgentDataChannel() {
           primaryAgentRef.current = fromIdentity;
           log('primary_agent', { identity: fromIdentity });
         } else if (fromIdentity !== primaryAgentRef.current) {
-          log('ignore_duplicate_agent', { from: fromIdentity, primary: primaryAgentRef.current });
+          log('ignore_duplicate_agent', {
+            from: fromIdentity,
+            primary: primaryAgentRef.current,
+          });
           return;
         }
       }
@@ -112,6 +133,7 @@ export function useAgentDataChannel() {
 
       setState((prev) => {
         let turns = [...turnsRef.current];
+        let userSession = userSessionRef.current;
         let patch: Partial<TranscriptState> = {};
 
         switch (kind) {
@@ -124,12 +146,27 @@ export function useAgentDataChannel() {
                 turns = finishAssistantStreaming(turns);
               }
 
-              if (
-                msg.state === 'interrupted' ||
-                (msg.state === 'thinking' && old === 'speaking')
-              ) {
+              if (msg.state === 'interrupted') {
                 turns = removeIncompleteAssistant(turns);
                 turns = finishAssistantStreaming(turns);
+              } else if (msg.state === 'thinking' && old === 'speaking') {
+                const last = turns.at(-1);
+                if (!last?.assistantText.trim()) {
+                  turns = removeIncompleteAssistant(turns);
+                }
+                turns = finishAssistantStreaming(turns);
+              }
+
+              if (
+                msg.state === 'speaking' ||
+                (msg.state === 'thinking' && old !== 'thinking')
+              ) {
+                turns = discardOpenUserDraft(turns);
+                userSession = clearActiveUserTurn(userSession);
+                transcriptLog('USER_DRAFT_DISCARDED', {
+                  reason: 'agent_state',
+                  state: msg.state,
+                });
               }
 
               if (msg.state === 'listening' && prev.turnMetrics.turnActive) {
@@ -147,46 +184,118 @@ export function useAgentDataChannel() {
             break;
 
           case 'user_transcript': {
-            if (!msg.text) break;
+            if (!msg.text?.trim()) break;
             const isFinal = Boolean(msg.is_final);
-            log('transcript_event', {
-              role: 'user',
-              is_final: isFinal,
-              message_id: msg.message_id,
-              turn_seq: msg.turn_seq,
-              text_preview: msg.text.slice(0, 80),
-            });
+            const text = msg.text;
 
-            const dedupeKey =
-              msg.message_id ||
-              (isFinal && msg.turn_seq
-                ? `final:${msg.turn_seq}:${msg.text.trim()}`
-                : '');
+            if (!isFinal) {
+              const seq = msg.turn_seq ?? 0;
+              const agentBusy =
+                prev.agentState === 'speaking' ||
+                prev.agentState === 'thinking';
+              const isNewTurnAfterFinal =
+                seq > 0 && seq > userSession.lastFinalizedTurnSeq;
 
-            if (isFinal && dedupeKey && seenUserMessageIdsRef.current.has(dedupeKey)) {
-              log('transcript_skip_duplicate_id', { message_id: dedupeKey });
+              if (agentBusy && !isNewTurnAfterFinal) {
+                transcriptLog('USER_PARTIAL_SUPPRESSED', {
+                  reason: 'agent_busy',
+                  agent_state: prev.agentState,
+                  turn_seq: seq,
+                  last_finalized_turn_seq: userSession.lastFinalizedTurnSeq,
+                });
+                break;
+              }
+
+              const result = upsertUserTranscript(
+                turns,
+                userSession,
+                text,
+                false,
+                msg.turn_seq,
+                msg.message_id,
+              );
+              turns = result.turns;
+              userSession = result.session;
+
+              if (result.action === 'DUPLICATE_TRANSCRIPT_DROPPED') {
+                transcriptLog('DUPLICATE_TRANSCRIPT_DROPPED', {
+                  phase: 'partial',
+                  turn_seq: msg.turn_seq,
+                });
+                break;
+              }
+
+              transcriptLog(
+                result.action === 'USER_MESSAGE_CREATED'
+                  ? 'USER_MESSAGE_CREATED'
+                  : 'TRANSCRIPT_PARTIAL_UPDATE',
+                {
+                  turn_seq: msg.turn_seq,
+                  message_id: msg.message_id,
+                  active_user_message_id: userSession.activeUserMessageId,
+                  text_preview: text.slice(0, 80),
+                },
+              );
+              if (result.action === 'USER_MESSAGE_UPDATED') {
+                transcriptLog('USER_MESSAGE_UPDATED', {
+                  turn_seq: msg.turn_seq,
+                  text_preview: text.slice(0, 80),
+                });
+              }
               break;
             }
 
-            turns = applyUserTranscript(
-              turns,
-              msg.text,
-              isFinal,
+            const dedupeKey = buildUserFinalDedupeKey(
+              text,
               msg.turn_seq,
+              msg.message_id,
             );
-
-            if (isFinal) {
-              if (dedupeKey) {
-                seenUserMessageIdsRef.current.add(dedupeKey);
-              }
-              patch.turnMetrics = startNewTurnMetrics(prev.turnMetrics);
-              log('transcript_append_user', {
-                message_id: msg.message_id,
+            if (
+              shouldSkipUserFinalCommit(
+                seenUserFinalKeysRef.current,
+                dedupeKey,
+                recentUserFinalAtRef.current,
+              )
+            ) {
+              transcriptLog('DUPLICATE_TRANSCRIPT_DROPPED', {
+                phase: 'final',
+                dedupe_key: dedupeKey,
                 turn_seq: msg.turn_seq,
-                text_preview: msg.text.slice(0, 80),
-                turn_count: turns.length,
               });
+              break;
             }
+
+            const result = upsertUserTranscript(
+              turns,
+              userSession,
+              text,
+              true,
+              msg.turn_seq,
+              msg.message_id,
+            );
+            turns = result.turns;
+            userSession = result.session;
+
+            recordUserFinalCommit(
+              seenUserFinalKeysRef.current,
+              recentUserFinalAtRef.current,
+              dedupeKey,
+            );
+            patch.agentState = 'thinking';
+            patch.turnMetrics = startNewTurnMetrics(prev.turnMetrics);
+
+            transcriptLog('TRANSCRIPT_FINAL_UPDATE', {
+              turn_seq: msg.turn_seq,
+              message_id: msg.message_id,
+              text_preview: text.slice(0, 80),
+            });
+            transcriptLog('USER_MESSAGE_FINALIZED', {
+              dedupe_key: dedupeKey,
+              active_user_message_id: userSession.activeUserMessageId,
+            });
+            transcriptLog('ACTIVE_USER_TURN_CLEARED', {
+              last_finalized_turn_seq: userSession.lastFinalizedTurnSeq,
+            });
             break;
           }
 
@@ -194,21 +303,41 @@ export function useAgentDataChannel() {
           case 'agent_text': {
             if (!msg.text?.trim()) break;
             const streaming = kind === 'llm_response' ? !msg.is_final : true;
-            log('llm_response_event', {
-              type: kind,
-              is_final: msg.is_final,
-              text_preview: msg.text.slice(0, 80),
-            });
-            const lastTurn = turns.at(-1);
+            const text = msg.text;
+
+            const result = upsertAssistantTranscript(
+              turns,
+              userSession,
+              text,
+              streaming,
+            );
+            turns = result.turns;
+            userSession = result.session;
+
+            if (result.action === 'ASSISTANT_EVENT_DROPPED_REASON') {
+              transcriptLog('ASSISTANT_EVENT_DROPPED_REASON', {
+                reason: result.dropReason,
+                kind,
+              });
+              break;
+            }
+
             if (
-              lastTurn?.userFinal &&
-              lastTurn.assistantText.trim() === msg.text.trim()
+              result.action === 'ASSISTANT_MESSAGE_CREATED' ||
+              result.action === 'ASSISTANT_MESSAGE_UPDATED'
             ) {
-              if (!streaming) {
-                turns = finishAssistantStreaming(turns);
-              }
-            } else {
-              turns = applyAssistantTranscript(turns, msg.text, streaming);
+              transcriptLog(
+                result.action === 'ASSISTANT_MESSAGE_CREATED'
+                  ? 'ASSISTANT_MESSAGE_CREATED'
+                  : 'ASSISTANT_MESSAGE_UPDATED',
+                { text_preview: text.slice(0, 80), streaming },
+              );
+            }
+            if (result.action === 'ASSISTANT_MESSAGE_FINALIZED' || !streaming) {
+              turns = finishAssistantStreaming(turns);
+              transcriptLog('ASSISTANT_MESSAGE_FINALIZED', {
+                text_preview: text.slice(0, 80),
+              });
             }
             break;
           }
@@ -238,6 +367,7 @@ export function useAgentDataChannel() {
         }
 
         turnsRef.current = turns;
+        userSessionRef.current = userSession;
         return {
           ...prev,
           ...patch,
@@ -249,35 +379,36 @@ export function useAgentDataChannel() {
     }
   }, []);
 
-  const bindRoom = useCallback(
-    (room: Room) => {
-      if (boundRoomNameRef.current === room.name) {
-        return () => {};
+  useEffect(() => {
+    dataHandlerRef.current = handleMessage;
+  }, [handleMessage]);
+
+  const bindRoom = useCallback((room: Room) => {
+    const roomName = room.name ?? '';
+    log('data_channel_bind', { room: roomName });
+
+    const onData = (
+      payload: Uint8Array,
+      participant?: { identity?: string },
+    ) => {
+      const identity = participant?.identity ?? '';
+      if (identity.startsWith('user-')) {
+        return;
       }
-      boundRoomNameRef.current = room.name;
-      log('data_channel_bind', { room: room.name });
+      dataHandlerRef.current(payload, identity);
+    };
 
-      const onData = (
-        payload: Uint8Array,
-        participant?: { identity?: string },
-      ) => {
-        const identity = participant?.identity ?? '';
-        if (identity.startsWith('user-')) {
-          return;
-        }
-        handleMessage(payload, identity);
-      };
+    room.on(RoomEvent.DataReceived, onData);
+    boundRoomNameRef.current = roomName;
 
-      room.on(RoomEvent.DataReceived, onData);
-      return () => {
-        room.off(RoomEvent.DataReceived, onData);
-        if (boundRoomNameRef.current === room.name) {
-          boundRoomNameRef.current = null;
-        }
-      };
-    },
-    [handleMessage],
-  );
+    return () => {
+      room.off(RoomEvent.DataReceived, onData);
+      if (boundRoomNameRef.current === roomName) {
+        boundRoomNameRef.current = null;
+      }
+      log('data_channel_unbind', { room: roomName });
+    };
+  }, []);
 
   return { state, bindRoom, reset };
 }

@@ -39,6 +39,7 @@ def log_block(
     step: str,
     status: str,
     duration_ms: int | float | None = None,
+    include_none: bool = False,
     **fields: Any,
 ) -> None:
     lines = [
@@ -50,8 +51,12 @@ def log_block(
     if duration_ms is not None:
         lines.append(_fmt_kv("duration_ms", f"{duration_ms:.2f}" if isinstance(duration_ms, float) else duration_ms))
     for key, value in fields.items():
-        if value is not None and value != "":
-            lines.append(_fmt_kv(key.replace("_", " "), value))
+        if not include_none and (value is None or value == ""):
+            continue
+        display = "null" if value is None else value
+        if display == "" and not include_none:
+            continue
+        lines.append(_fmt_kv(key.replace("_", " "), display))
     lines.append(_separator())
     logger.log(level, "\n%s", "\n".join(lines))
 

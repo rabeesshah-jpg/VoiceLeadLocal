@@ -8,6 +8,7 @@ import uuid
 
 from django.conf import settings
 
+from agent.pipeline.stt_config import validate_stt_env
 from agent.prompts import get_voice_agent_instructions
 from apps.calls.models import CallEvent, CallSession
 from config.step_log import StepTimer
@@ -17,7 +18,6 @@ logger = logging.getLogger("apps.calls.services")
 
 class SessionRegistry:
     REQUIRED_PROVIDER_VARS = (
-        "DEEPGRAM_API_KEY",
         "OPENROUTER_API_KEY",
         "TTS_BASE_URL",
     )
@@ -41,6 +41,8 @@ class SessionRegistry:
                     continue
                 if not getattr(settings, var, None) and not os.environ.get(var):
                     missing.append(var)
+
+            missing.extend(validate_stt_env())
             return missing
 
     @classmethod

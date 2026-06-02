@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from agent.observability.pipeline_events import log_pipeline_event
 from agent.observability.pipeline_latency import TurnPipelineTracker
 
 
@@ -20,13 +19,7 @@ def note_first_llm_token(
         return already_noted
     if pipeline is not None and pipeline.t_tts_llm_input_first is None:
         pipeline.mark_tts_llm_input_first(token_preview=str(token)[:40])
-        log_pipeline_event(
-            "LLM_FIRST_TOKEN",
-            room=pipeline.room,
-            turn_id=pipeline.turn_id,
-            source="tts_input_stream",
-            token_preview=str(token)[:40],
-        )
+        pipeline.mark_llm_first_token(token_preview=str(token))
     if on_llm_first_token is not None:
         on_llm_first_token()
     return True

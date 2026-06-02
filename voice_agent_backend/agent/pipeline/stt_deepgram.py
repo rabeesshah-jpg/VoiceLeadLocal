@@ -56,18 +56,22 @@ def build_deepgram_stt(
     model, dg_language = resolve_deepgram_stt(conversation_language)
     # Deepgram streaming endpointing (ms of silence before a final transcript).
     # Same role as vad_turnoff_ms in raw Deepgram API; LiveKit plugin uses endpointing_ms.
-    endpointing_ms = _env_int("VOICE_AGENT_DEEPGRAM_ENDPOINTING_MS", 300)
-    return deepgram.STT(
-        model=model,
-        language=dg_language,
-        api_key=os.environ.get("DEEPGRAM_API_KEY"),
-        interim_results=True,
-        punctuate=True,
-        smart_format=True,
-        no_delay=True,
-        sample_rate=_env_int("VOICE_AGENT_STT_SAMPLE_RATE", 16000),
-        endpointing_ms=endpointing_ms,
-        vad_events=True,
-        filler_words=_env_bool("VOICE_AGENT_DEEPGRAM_FILLER_WORDS", True),
-        http_session=http_session,
-    )
+    endpointing_ms = _env_int("VOICE_AGENT_DEEPGRAM_ENDPOINTING_MS", 100)
+    kwargs: dict = {
+        "model": model,
+        "language": dg_language,
+        "api_key": os.environ.get("DEEPGRAM_API_KEY"),
+        "interim_results": True,
+        "punctuate": _env_bool("VOICE_AGENT_DEEPGRAM_PUNCTUATE", True),
+        "smart_format": _env_bool("VOICE_AGENT_DEEPGRAM_SMART_FORMAT", False),
+        "no_delay": True,
+        "sample_rate": _env_int("VOICE_AGENT_STT_SAMPLE_RATE", 16000),
+        "endpointing_ms": endpointing_ms,
+        "vad_events": True,
+        "filler_words": _env_bool("VOICE_AGENT_DEEPGRAM_FILLER_WORDS", False),
+        "http_session": http_session,
+    }
+    base_url = (os.environ.get("VOICE_AGENT_DEEPGRAM_BASE_URL") or "").strip()
+    if base_url:
+        kwargs["base_url"] = base_url
+    return deepgram.STT(**kwargs)
