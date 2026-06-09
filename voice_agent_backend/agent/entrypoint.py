@@ -148,21 +148,26 @@ def _resolve_language(ctx: JobContext, db_session) -> str:
 def _resolve_tts_config(
     ctx: JobContext, db_session, *, language: str | None = None
 ) -> dict[str, str | float]:
+    from apps.calls.services.voice_tts_config import merge_tts_config_from_sources
+
     lang = language or _resolve_language(ctx, db_session)
-    if db_session and db_session.persona_id:
-        cfg = resolve_tts_config(db_session.persona_id, language=lang)
-        if cfg:
-            return cfg
     try:
         meta = json.loads(ctx.job.metadata or "{}")
     except json.JSONDecodeError:
-        return resolve_tts_config(None, language=lang)
-    tts = meta.get("tts")
-    if isinstance(tts, dict) and tts:
-        merged = dict(tts)
-        merged.setdefault("lang", lang)
-        return merged
-    return resolve_tts_config(meta.get("persona_id"), language=lang)
+        meta = {}
+
+    persona_id = ""
+    if db_session and db_session.persona_id:
+        persona_id = db_session.persona_id
+    elif meta.get("persona_id"):
+        persona_id = str(meta["persona_id"])
+
+    return merge_tts_config_from_sources(
+        language=lang,
+        persona_id=persona_id,
+        meta=meta,
+        db_session=db_session,
+    )
 
 
 def _build_session(
@@ -195,15 +200,11 @@ def _build_session(
     with StepTimer(logger, operation, "init_openrouter_llm", model=llm_model):
         llm = build_openrouter_llm()
 
+    from apps.calls.services.voice_tts_config import effective_tts_voice
+
     tts_base = _env("TTS_BASE_URL") or _env("CHATTERBOX_TTS_URL", "http://127.0.0.1:7788")
     tts_cfg = tts_config or {}
-    tts_voice = str(
-        tts_cfg.get("speaker_wav")
-        or tts_cfg.get("voice")
-        or tts_cfg.get("predefined_voice_id")
-        or _env("TTS_VOICE")
-        or _env("VOICE_AGENT_CHATTERBOX_VOICE_ID", "female")
-    )
+    tts_voice = effective_tts_voice(tts_cfg)
     tts_lang = str(tts_cfg.get("lang") or _env("TTS_LANG", "en"))
     with StepTimer(
         logger,
@@ -211,7 +212,9 @@ def _build_session(
         "init_tts",
         provider=get_tts_provider(),
         base_url=tts_base,
+        voice_mode=tts_cfg.get("voice_mode", "preset"),
         voice=tts_voice,
+        provider_voice_id=tts_cfg.get("provider_voice_id", ""),
         lang=tts_lang,
     ):
         tts = build_tts(
@@ -350,7 +353,28 @@ async def entrypoint(ctx: JobContext):
     user_stt_lang_holder[0] = default_user_stt_language(language)
     greeting_text = get_call_greeting(language)
 
+    try:
+        job_meta = json.loads(ctx.job.metadata or "{}")
+    except json.JSONDecodeError:
+        job_meta = {}
+    log_block(
+        logger,
+        logging.INFO,
+        operation=operation,
+        step="worker_metadata_received",
+        status="OK",
+        room=room_name,
+        job_id=job_id,
+        voice_mode=job_meta.get("voice_mode", "preset"),
+        voice_profile_id=job_meta.get("voice_profile_id", ""),
+        provider_voice_id=job_meta.get("provider_voice_id", ""),
+        fallback_voice=job_meta.get("fallback_voice", ""),
+    )
+
     tts_config = _resolve_tts_config(ctx, db_session, language=language)
+    from apps.calls.services.voice_tts_config import effective_tts_voice
+
+    effective_voice = effective_tts_voice(tts_config)
     log_block(
         logger,
         logging.INFO,
@@ -360,20 +384,19 @@ async def entrypoint(ctx: JobContext):
         room=room_name,
         persona_id=getattr(db_session, "persona_id", "") if db_session else "",
         language=language,
-        voice=tts_config.get("voice") or tts_config.get("predefined_voice_id"),
+        voice_mode=tts_config.get("voice_mode", "preset"),
+        preset_voice=tts_config.get("voice") or tts_config.get("predefined_voice_id"),
+        effective_tts_voice=effective_voice,
         lang=tts_config.get("lang"),
+        voice_profile_id=tts_config.get("voice_profile_id", ""),
+        provider_voice_id=tts_config.get("provider_voice_id", ""),
+        fallback_voice=tts_config.get("fallback_voice", ""),
     )
 
     await log_call_event(room_name, "worker_joined", {"job_id": job_id})
 
     tts_base = _env("TTS_BASE_URL") or _env("CHATTERBOX_TTS_URL", "http://127.0.0.1:7788")
-    tts_voice = str(
-        tts_config.get("speaker_wav")
-        or tts_config.get("voice")
-        or tts_config.get("predefined_voice_id")
-        or _env("TTS_VOICE")
-        or _env("VOICE_AGENT_CHATTERBOX_VOICE_ID", "female")
-    )
+    tts_voice = effective_voice
     tts_lang = str(tts_config.get("lang") or _env("TTS_LANG", "en"))
 
     from agent.pipeline.tts_http_pool import warmup_tts_connection
@@ -1150,7 +1173,9 @@ async def _get_session_async(room_name: str):
 
     with StepTimer(logger, "DATABASE", "fetch_call_session", room=room_name):
         return await sync_to_async(
-            lambda: CallSession.objects.filter(room_name=room_name).first(),
+            lambda: CallSession.objects.select_related("voice_profile")
+            .filter(room_name=room_name)
+            .first(),
             thread_sensitive=True,
         )()
 

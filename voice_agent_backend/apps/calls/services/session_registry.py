@@ -52,6 +52,10 @@ class SessionRegistry:
         persona_id: str = "",
         system_prompt: str = "",
         language: str = "en",
+        voice_mode: str = "preset",
+        voice_profile=None,
+        provider_voice_id: str = "",
+        fallback_voice: str = "",
     ) -> CallSession:
         with StepTimer(
             logger,
@@ -69,8 +73,12 @@ class SessionRegistry:
                 room_name=room_name,
                 user_identity=user_identity,
                 persona_id=persona_id or "",
+                voice_mode=voice_mode or "preset",
                 language=language,
                 system_prompt=prompt,
+                voice_profile=voice_profile,
+                provider_voice_id=provider_voice_id or "",
+                fallback_voice=fallback_voice or "",
                 status=CallSession.STATUS_CREATED,
             )
             cls.log_event(

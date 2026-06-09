@@ -11,6 +11,14 @@ function headers(): HeadersInit {
   };
 }
 
+export interface CallVoiceConfig {
+  voice_mode: 'preset' | 'custom';
+  voice_profile_id: string | null;
+  provider_voice_id: string | null;
+  fallback_voice: string;
+  tts_voice: string;
+}
+
 export interface StartCallResponse {
   call_id: string;
   room_name: string;
@@ -18,6 +26,7 @@ export interface StartCallResponse {
   participant_token: string;
   participant_identity: string;
   expires_at: string;
+  voice?: CallVoiceConfig;
 }
 
 function describeFetchError(err: unknown, url: string): string {
@@ -67,10 +76,15 @@ async function apiFetch(
 
 export interface StartCallOptions {
   system_prompt?: string;
-  /** male → Michael.wav, female → Olivia.wav (+ TTS expressiveness params) */
+  /** male → M1, female → F1 */
   persona_id?: 'male' | 'female' | '';
   /** en (English) or ar (Arabic) */
   language?: CallLanguage;
+  voice_mode?: 'preset' | 'custom';
+  /** Cloned voice profile UUID (when using custom voice mode) */
+  voice_profile_id?: string | null;
+  /** Preset voice id used if cloned voice fails (e.g. M1, F1) */
+  fallback_voice?: string;
 }
 
 export async function startCall(options: StartCallOptions = {}): Promise<StartCallResponse> {
@@ -83,6 +97,11 @@ export async function startCall(options: StartCallOptions = {}): Promise<StartCa
         system_prompt: options.system_prompt || '',
         persona_id: options.persona_id || '',
         language: options.language || 'en',
+        voice_mode: options.voice_mode || 'preset',
+        ...(options.voice_profile_id
+          ? { voice_profile_id: options.voice_profile_id }
+          : {}),
+        ...(options.fallback_voice ? { fallback_voice: options.fallback_voice } : {}),
       }),
     },
     'start_call',
@@ -105,6 +124,10 @@ export async function startCall(options: StartCallOptions = {}): Promise<StartCa
     livekitUrl: body.livekit_url,
     identity: body.participant_identity,
     language: options.language || 'en',
+    voiceMode: options.voice_mode || 'preset',
+    voiceProfileId: options.voice_profile_id ?? null,
+    providerVoiceId: body.voice?.provider_voice_id ?? null,
+    ttsVoice: body.voice?.tts_voice ?? null,
     tokenLength: body.participant_token?.length ?? 0,
   });
   return body;

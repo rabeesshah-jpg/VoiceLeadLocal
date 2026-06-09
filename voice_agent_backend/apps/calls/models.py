@@ -4,6 +4,65 @@ from django.db import models
 from django.utils import timezone
 
 
+def voice_profile_upload_to(instance, filename: str) -> str:
+    return f"voice_profiles/{instance.id}/{filename}"
+
+
+class VoiceProfile(models.Model):
+    STATUS_PENDING = "pending"
+    STATUS_PROCESSING = "processing"
+    STATUS_READY = "ready"
+    STATUS_FAILED = "failed"
+
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_PROCESSING, "Processing"),
+        (STATUS_READY, "Ready"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    PROVIDER_RUNPOD_SUPERTONIC = "runpod_supertonic"
+
+    SOURCE_REFERENCE_AUDIO = "reference_audio"
+    SOURCE_VOICE_BUILDER_JSON = "voice_builder_json"
+    SOURCE_PRESET = "preset"
+    SOURCE_UNKNOWN = "unknown"
+
+    SOURCE_TYPE_CHOICES = [
+        (SOURCE_REFERENCE_AUDIO, "Reference audio"),
+        (SOURCE_VOICE_BUILDER_JSON, "Voice Builder JSON"),
+        (SOURCE_PRESET, "Preset"),
+        (SOURCE_UNKNOWN, "Unknown"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=128)
+    status = models.CharField(
+        max_length=32, choices=STATUS_CHOICES, default=STATUS_PENDING
+    )
+    provider = models.CharField(max_length=64, default=PROVIDER_RUNPOD_SUPERTONIC)
+    provider_voice_id = models.CharField(max_length=256, blank=True, default="")
+    runpod_voice_uuid = models.CharField(max_length=64, blank=True, default="")
+    source_type = models.CharField(
+        max_length=32,
+        choices=SOURCE_TYPE_CHOICES,
+        default=SOURCE_UNKNOWN,
+    )
+    reference_audio_file = models.FileField(
+        upload_to=voice_profile_upload_to, blank=True, null=True
+    )
+    error_message = models.TextField(blank=True, default="")
+    is_default = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.status})"
+
+
 class CallSession(models.Model):
     STATUS_CREATED = "created"
     STATUS_ACTIVE = "active"
@@ -22,6 +81,16 @@ class CallSession(models.Model):
     user_identity = models.CharField(max_length=128)
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_CREATED)
     persona_id = models.CharField(max_length=64, blank=True, default="")
+    voice_mode = models.CharField(max_length=16, blank=True, default="preset")
+    voice_profile = models.ForeignKey(
+        VoiceProfile,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="call_sessions",
+    )
+    provider_voice_id = models.CharField(max_length=256, blank=True, default="")
+    fallback_voice = models.CharField(max_length=64, blank=True, default="")
     language = models.CharField(max_length=8, default="en")
     system_prompt = models.TextField(blank=True, default="")
     token_expires_at = models.DateTimeField(null=True, blank=True)

@@ -19,7 +19,8 @@ import PageHeader from '../components/PageHeader';
 import IntroSection from '../components/IntroSection';
 import ChatHeader from '../components/ChatHeader';
 import CallEmptyState from '../components/CallEmptyState';
-import CallFooter from '../components/CallFooter';
+import CallFooter, { type VoiceMode } from '../components/CallFooter';
+import { isVoiceProfileUsable, type VoiceProfile } from '../api/voiceProfiles';
 import PageFooter from '../components/PageFooter';
 import LatencyPanel from '../components/LatencyPanel';
 import { useAgentDataChannel } from '../hooks/useAgentDataChannel';
@@ -29,7 +30,10 @@ export default function VoiceCallPage() {
   const [busy, setBusy] = useState(false);
   const [muted, setMuted] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
+  const [voiceMode, setVoiceMode] = useState<VoiceMode>('preset');
   const [voice, setVoice] = useState<VoiceGender>(DEFAULT_VOICE_GENDER);
+  const [voiceProfileId, setVoiceProfileId] = useState<string | null>(null);
+  const [voiceProfiles, setVoiceProfiles] = useState<VoiceProfile[]>([]);
   const [language, setLanguage] = useState<CallLanguage>(DEFAULT_CALL_LANGUAGE);
   const { state: transcriptState, bindRoom, reset } = useAgentDataChannel();
 
@@ -49,18 +53,35 @@ export default function VoiceCallPage() {
     setBusy(true);
     setApiError(null);
     reset();
+    const fallbackVoice = VOICE_PRESETS[voice].tts.voice;
+    const selectedProfile = voiceProfiles.find((p) => p.id === voiceProfileId);
+    const providerVoiceId = selectedProfile?.provider_voice_id || null;
+    const startPayload = {
+      persona_id: voice,
+      language,
+      voice_mode: voiceMode,
+      ...(voiceMode === 'custom' && voiceProfileId
+        ? { voice_profile_id: voiceProfileId, fallback_voice: fallbackVoice }
+        : {}),
+    };
     log('ui_start_call_clicked', {
+      voiceMode,
       voice,
+      voiceProfileId,
+      providerVoiceId,
       language,
       tts: VOICE_PRESETS[voice].tts,
+      fallbackVoice,
+      startPayload,
     });
     try {
-      const s = await startCall({ persona_id: voice, language });
+      const s = await startCall(startPayload);
       log('ui_livekit_connecting', {
         room: s.room_name,
         url: s.livekit_url,
         voice,
         language,
+        voiceConfig: s.voice ?? null,
       });
       setSession(s);
     } catch (e) {
@@ -70,7 +91,7 @@ export default function VoiceCallPage() {
     } finally {
       setBusy(false);
     }
-  }, [reset, voice, language]);
+  }, [reset, voice, language, voiceMode, voiceProfileId, voiceProfiles]);
 
   const handleEnd = useCallback(async () => {
     if (!session) return;
@@ -109,6 +130,16 @@ export default function VoiceCallPage() {
   }, [inCall, handleEnd, handleStart]);
 
   const displayError = apiError || transcriptState.lastError;
+
+  const selectedProfile = voiceProfiles.find((p) => p.id === voiceProfileId);
+  const profileUsable = selectedProfile ? isVoiceProfileUsable(selectedProfile) : false;
+  const customVoiceBlocked =
+    voiceMode === 'custom' && (!voiceProfileId || !profileUsable);
+  const startDisabledReason = customVoiceBlocked
+    ? !voiceProfileId
+      ? 'Select or create a voice profile before starting a call.'
+      : 'Voice profile is still processing or not ready.'
+    : null;
 
   return (
     <div className="page">
@@ -150,12 +181,20 @@ export default function VoiceCallPage() {
         </div>
 
         <CallFooter
+          voiceMode={voiceMode}
+          onVoiceModeChange={setVoiceMode}
           voice={voice}
           onVoiceChange={setVoice}
+          voiceProfileId={voiceProfileId}
+          onVoiceProfileChange={setVoiceProfileId}
+          voiceProfiles={voiceProfiles}
+          onVoiceProfilesChange={setVoiceProfiles}
           language={language}
           onLanguageChange={setLanguage}
           inCall={inCall}
           busy={busy}
+          startDisabled={customVoiceBlocked}
+          startDisabledReason={startDisabledReason}
           onCall={handleCallAction}
         />
       </section>

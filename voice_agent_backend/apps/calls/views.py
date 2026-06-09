@@ -7,7 +7,12 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.calls.auth import DevApiKeyAuthentication
-from apps.calls.models import CallSession
+from apps.calls.models import CallSession, VoiceProfile
+from apps.calls.services.voice_tts_config import (
+    build_tts_metadata_for_call,
+    effective_tts_voice,
+    resolve_fallback_voice,
+)
 from apps.calls.serializers import (
     CallSessionDetailSerializer,
     EndCallSerializer,
@@ -75,7 +80,64 @@ class StartCallView(APIView):
         persona_id = serializer.validated_data.get("persona_id", "")
         language = normalize_language(serializer.validated_data.get("language", "en"))
         system_prompt = serializer.validated_data.get("system_prompt", "")
+        voice_mode = serializer.validated_data.get("voice_mode", "preset")
+        voice_profile_id = serializer.validated_data.get("voice_profile_id")
+        fallback_voice = (serializer.validated_data.get("fallback_voice") or "").strip()
         instructions = system_prompt.strip() or get_voice_agent_instructions(language)
+
+        voice_profile = None
+        if voice_mode == "custom" and voice_profile_id:
+            voice_profile = VoiceProfile.objects.filter(pk=voice_profile_id).first()
+            if not voice_profile:
+                return Response(
+                    {"error": "Voice profile not found."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if voice_profile.status != VoiceProfile.STATUS_READY:
+                return Response(
+                    {
+                        "error": f"Voice profile is not ready (status: {voice_profile.status}).",
+                        "profile": {
+                            "id": str(voice_profile.id),
+                            "status": voice_profile.status,
+                            "error_message": voice_profile.error_message,
+                        },
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not voice_profile.provider_voice_id:
+                return Response(
+                    {"error": "Voice profile is missing provider voice id."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        resolved_fallback = fallback_voice or resolve_fallback_voice(
+            persona_id, language=language
+        )
+        try:
+            tts_config = build_tts_metadata_for_call(
+                persona_id=persona_id,
+                language=language,
+                voice_mode=voice_mode,
+                voice_profile=voice_profile,
+                fallback_voice=resolved_fallback,
+            )
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        log_block(
+            logger,
+            logging.INFO,
+            operation=operation,
+            step="voice_metadata",
+            status="OK",
+            request_id=request_id,
+            voice_mode=tts_config.get("voice_mode"),
+            voice_profile_id=tts_config.get("voice_profile_id", ""),
+            provider_voice_id=tts_config.get("provider_voice_id", ""),
+            fallback_voice=tts_config.get("fallback_voice", ""),
+            tts_voice=effective_tts_voice(tts_config),
+        )
 
         lk_service = LiveKitTokenService()
         with StepTimer(logger, operation, "livekit_config", request_id=request_id):
@@ -119,8 +181,12 @@ class StartCallView(APIView):
             request_id=request_id,
             persona_id=persona_id or "default",
         ):
+            warmup_voice = effective_tts_voice(tts_config)
             handshake = run_supertonic_handshake(
-                persona_id=persona_id, language=language, force=True
+                persona_id=persona_id,
+                language=language,
+                force=True,
+                voice_override=warmup_voice,
             )
             if not handshake.get("ok") and not handshake.get("skipped"):
                 log_block(
@@ -144,6 +210,10 @@ class StartCallView(APIView):
                 persona_id=persona_id,
                 system_prompt=instructions,
                 language=language,
+                voice_mode=voice_mode,
+                voice_profile=voice_profile,
+                provider_voice_id=tts_config.get("provider_voice_id", ""),
+                fallback_voice=resolved_fallback,
             )
 
         if not getattr(settings, "VOICE_AGENT_SKIP_ROOM_SETUP", False):
@@ -162,6 +232,7 @@ class StartCallView(APIView):
                         system_prompt=session.system_prompt,
                         persona_id=persona_id or session.persona_id,
                         language=language,
+                        tts_config=tts_config,
                     )
                     log_block(
                         logger,
@@ -254,6 +325,15 @@ class StartCallView(APIView):
                 "participant_token": participant.token,
                 "participant_identity": participant.identity,
                 "expires_at": participant.expires_at.isoformat(),
+                "voice": {
+                    "voice_mode": session.voice_mode,
+                    "voice_profile_id": str(session.voice_profile_id)
+                    if session.voice_profile_id
+                    else None,
+                    "provider_voice_id": session.provider_voice_id or None,
+                    "fallback_voice": session.fallback_voice or resolved_fallback,
+                    "tts_voice": effective_tts_voice(tts_config),
+                },
             },
             status=status.HTTP_201_CREATED,
         )

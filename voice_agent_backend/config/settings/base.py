@@ -108,6 +108,20 @@ TTS_MODEL = env("TTS_MODEL", default="multilingual")
 TTS_VOICE = env("TTS_VOICE", default="M1")
 TTS_LANG = env("TTS_LANG", default="en")
 TTS_MAX_CHUNK_LENGTH = env.int("TTS_MAX_CHUNK_LENGTH", default=300)
+TTS_VOICE_CLONING_ENABLED = env.bool("TTS_VOICE_CLONING_ENABLED", default=True)
+TTS_CLONE_ENDPOINT = env("TTS_CLONE_ENDPOINT", default="/v1/voices/clone")
+TTS_SYNTH_ENDPOINT = env("TTS_SYNTH_ENDPOINT", default="/v1/tts")
+TTS_TIMEOUT = env.int("TTS_TIMEOUT", default=60)
+TTS_CLONE_TIMEOUT_SECONDS = env.int("TTS_CLONE_TIMEOUT_SECONDS", default=120)
+TTS_CLONE_MAX_BYTES = env.int("TTS_CLONE_MAX_BYTES", default=15 * 1024 * 1024)
+TTS_CLONE_POLL_TIMEOUT_SECONDS = env.int("TTS_CLONE_POLL_TIMEOUT_SECONDS", default=90)
+TTS_CLONE_POLL_INTERVAL_SECONDS = env.int("TTS_CLONE_POLL_INTERVAL_SECONDS", default=2)
+TTS_CLONE_ALLOWED_EXTENSIONS = env.list(
+    "TTS_CLONE_ALLOWED_EXTENSIONS", default=["wav", "webm", "mp3", "m4a"]
+)
+
+MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "media"
 
 # Legacy Chatterbox multilingual (RunPod) — deprecated, kept for env migration only:
 CHATTERBOX_TTS_URL = env("CHATTERBOX_TTS_URL", default="")

@@ -71,6 +71,29 @@ Example block:
 ────────────────────────────────────────────────────────────────────────────────
 ```
 
+## RunPod TTS smoke test
+
+```bash
+cd voice_agent_backend
+source .venv/bin/activate
+python scripts/test_runpod_tts.py
+
+# Custom voice (use RunPod profile UUID, not vp_* engine name):
+python scripts/test_runpod_tts.py --voice-id <uuid>
+```
+
+Required `.env` values:
+
+```
+TTS_BASE_URL=http://103.196.86.172:34679
+TTS_MODEL=supertonic-3
+TTS_LANG=en
+TTS_TIMEOUT=60
+TTS_CLONE_ENDPOINT=/v1/voices/clone
+```
+
+Recorded audio cloning requires `SUPERTONE_API_KEY` on the RunPod server (`supports_reference_audio_cloning=true` in capabilities).
+
 ## Tests
 
 ```bash

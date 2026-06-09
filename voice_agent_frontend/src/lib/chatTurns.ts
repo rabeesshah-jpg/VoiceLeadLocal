@@ -599,7 +599,7 @@ export function applyUserTranscript(
 ): ChatTurn[] {
   let session = createUserTranscriptSession();
   let current = turns;
-  const { turns: t, session: s } = upsertUserTranscript(
+  const { turns: t, session: _s } = upsertUserTranscript(
     current,
     session,
     text,

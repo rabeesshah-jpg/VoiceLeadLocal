@@ -31,6 +31,7 @@ async def _ensure_room_and_dispatch_async(
     system_prompt: str,
     persona_id: str = "",
     language: str = "en",
+    tts_config: dict | None = None,
 ) -> dict:
     from livekit import api
     from livekit.protocol.agent_dispatch import CreateAgentDispatchRequest
@@ -41,16 +42,36 @@ async def _ensure_room_and_dispatch_async(
     )
     from agent.pipeline.voice_presets import resolve_tts_config
 
-    tts_config = resolve_tts_config(persona_id, language=language)
-    metadata = json.dumps(
-        {
-            "call_id": call_id,
-            "system_prompt": (system_prompt or "")[:2000],
-            "persona_id": persona_id or "",
-            "language": language,
-            "tts": tts_config,
-        }
+    if not tts_config:
+        tts_config = resolve_tts_config(persona_id, language=language)
+    runpod_voice_id = tts_config.get("provider_voice_id") or tts_config.get("voice_id") or ""
+    dispatch_voice = {
+        "call_id": call_id,
+        "system_prompt": (system_prompt or "")[:2000],
+        "persona_id": persona_id or "",
+        "language": language,
+        "voice_mode": tts_config.get("voice_mode", "preset"),
+        "voice_profile_id": tts_config.get("voice_profile_id", ""),
+        "voice_id": runpod_voice_id,
+        "provider_voice_id": runpod_voice_id,
+        "fallback_voice": tts_config.get("fallback_voice", ""),
+        "tts_base_url": tts_config.get("tts_base_url", ""),
+        "tts": tts_config,
+    }
+    log_block(
+        logger,
+        logging.INFO,
+        operation="LIVEKIT",
+        step="dispatch_metadata",
+        status="OK",
+        room=room_name,
+        call_id=call_id,
+        voice_mode=dispatch_voice["voice_mode"],
+        voice_profile_id=dispatch_voice["voice_profile_id"] or "none",
+        provider_voice_id=dispatch_voice["provider_voice_id"] or "none",
+        fallback_voice=dispatch_voice["fallback_voice"] or "none",
     )
+    metadata = json.dumps(dispatch_voice)
 
     api_url = _api_url()
     lk = api.LiveKitAPI(
@@ -150,6 +171,7 @@ def ensure_room_and_dispatch_agent(
     system_prompt: str = "",
     persona_id: str = "",
     language: str = "en",
+    tts_config: dict | None = None,
 ) -> dict:
     """Sync wrapper for Django views."""
     try:
@@ -160,6 +182,7 @@ def ensure_room_and_dispatch_agent(
                 system_prompt=system_prompt,
                 persona_id=persona_id,
                 language=language,
+                tts_config=tts_config,
             )
         )
     except Exception as exc:

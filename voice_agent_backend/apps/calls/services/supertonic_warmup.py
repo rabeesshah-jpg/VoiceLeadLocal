@@ -28,7 +28,11 @@ def _resolve_voice_lang(persona_id: str = "", *, language: str = "en") -> tuple[
 
 
 def run_supertonic_handshake(
-    *, persona_id: str = "", language: str = "en", force: bool = False
+    *,
+    persona_id: str = "",
+    language: str = "en",
+    force: bool = False,
+    voice_override: str = "",
 ) -> dict:
     if getattr(settings, "VOICE_AGENT_SKIP_TTS_WARMUP", False):
         return {"ok": True, "skipped": True, "reason": "VOICE_AGENT_SKIP_TTS_WARMUP"}
@@ -41,6 +45,8 @@ def run_supertonic_handshake(
         return {"ok": False, "reason": "TTS_BASE_URL missing"}
 
     voice, lang = _resolve_voice_lang(persona_id, language=language)
+    if voice_override:
+        voice = voice_override
     operation = "TTS_HANDSHAKE"
     with StepTimer(
         logger,

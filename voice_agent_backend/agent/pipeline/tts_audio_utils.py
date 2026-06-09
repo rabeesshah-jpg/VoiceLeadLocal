@@ -8,6 +8,47 @@ import struct
 WAV_HEADER_BYTES = 44
 
 
+def is_wav(data: bytes) -> bool:
+    return len(data) >= WAV_HEADER_BYTES and data[:4] == b"RIFF" and data[8:12] == b"WAVE"
+
+
+def is_json_response(data: bytes) -> bool:
+    stripped = data.lstrip()
+    return bool(stripped.startswith(b"{") or stripped.startswith(b"["))
+
+
+def parse_wav_info(data: bytes) -> dict:
+    """Parse standard PCM WAV header (44-byte)."""
+    if not is_wav(data):
+        return {
+            "valid": False,
+            "sample_rate": 0,
+            "channels": 0,
+            "bits_per_sample": 0,
+            "data_bytes": 0,
+            "duration_sec": 0.0,
+            "pcm_frames": 0,
+        }
+    channels = struct.unpack_from("<H", data, 22)[0]
+    sample_rate = struct.unpack_from("<I", data, 24)[0]
+    bits_per_sample = struct.unpack_from("<H", data, 34)[0]
+    data_bytes = struct.unpack_from("<I", data, 40)[0]
+    bytes_per_frame = channels * max(bits_per_sample // 8, 1)
+    pcm_frames = data_bytes // bytes_per_frame if bytes_per_frame else 0
+    duration_sec = (
+        pcm_frames / sample_rate if sample_rate and pcm_frames else 0.0
+    )
+    return {
+        "valid": True,
+        "sample_rate": sample_rate,
+        "channels": channels,
+        "bits_per_sample": bits_per_sample,
+        "data_bytes": data_bytes,
+        "duration_sec": duration_sec,
+        "pcm_frames": pcm_frames,
+    }
+
+
 def _env_int(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, str(default)))
