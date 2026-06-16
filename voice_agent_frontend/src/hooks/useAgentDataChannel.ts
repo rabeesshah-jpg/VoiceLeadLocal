@@ -351,6 +351,7 @@ export function useAgentDataChannel() {
           case 'voice_turn_latency_summary':
             patch.lastLatency = msg;
             patch.turnMetrics = applyTurnSummaryLatency(prev.turnMetrics, msg);
+            console.log('[VoiceAgent] turn_latency', msg);
             break;
 
           case 'error':

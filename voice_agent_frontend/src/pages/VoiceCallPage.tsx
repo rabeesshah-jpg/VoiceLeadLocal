@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { LiveKitRoom, RoomAudioRenderer } from '@livekit/components-react';
 import { endCall, getHealth, startCall, type StartCallResponse } from '../api/calls';
 import { log, logError } from '../lib/logger';
+import { setUiTelemetryCallContext } from '../lib/uiTelemetry';
 import {
   DEFAULT_CALL_LANGUAGE,
   type CallLanguage,
@@ -14,6 +15,7 @@ import {
 import TranscriptPanel from '../components/TranscriptPanel';
 import AudioVisualizer from '../components/AudioVisualizer';
 import RoomDataBinder from '../components/RoomDataBinder';
+import BrowserAudioTelemetry from '../components/BrowserAudioTelemetry';
 import MuteSync from '../components/MuteSync';
 import PageHeader from '../components/PageHeader';
 import IntroSection from '../components/IntroSection';
@@ -74,6 +76,9 @@ export default function VoiceCallPage() {
       fallbackVoice,
       startPayload,
     });
+    if (voiceMode === 'custom') {
+      log('START_CALL_CUSTOM_VOICE_PAYLOAD', startPayload);
+    }
     try {
       const s = await startCall(startPayload);
       log('ui_livekit_connecting', {
@@ -84,6 +89,7 @@ export default function VoiceCallPage() {
         voiceConfig: s.voice ?? null,
       });
       setSession(s);
+      setUiTelemetryCallContext(s.call_id, s.room_name);
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to start';
       logError('ui_start_call_failed', { message: msg });
@@ -105,6 +111,7 @@ export default function VoiceCallPage() {
       });
     }
     setSession(null);
+    setUiTelemetryCallContext(null, null);
     reset();
     setMuted(false);
     setBusy(false);
@@ -219,6 +226,7 @@ export default function VoiceCallPage() {
           }}
         >
           <RoomDataBinder bindRoom={bindRoom} />
+          <BrowserAudioTelemetry />
           <MuteSync muted={muted} />
           <RoomAudioRenderer />
         </LiveKitRoom>

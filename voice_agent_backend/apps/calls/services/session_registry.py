@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import logging
-import os
 import uuid
 
 from django.conf import settings
 
-from agent.pipeline.stt_config import validate_stt_env
 from agent.prompts import get_voice_agent_instructions
 from apps.calls.models import CallEvent, CallSession
 from config.step_log import StepTimer
@@ -17,33 +15,14 @@ logger = logging.getLogger("apps.calls.services")
 
 
 class SessionRegistry:
-    REQUIRED_PROVIDER_VARS = (
-        "OPENROUTER_API_KEY",
-        "TTS_BASE_URL",
-    )
-
-    @classmethod
-    def _tts_base_configured(cls) -> bool:
-        return bool(getattr(settings, "TTS_BASE_URL", None)) or bool(
-            getattr(settings, "CHATTERBOX_TTS_URL", None)
-        )
-
     @classmethod
     def validate_providers(cls) -> list[str]:
-        with StepTimer(logger, "PROVIDERS", "validate_env"):
-            missing = []
-            for var in cls.REQUIRED_PROVIDER_VARS:
-                if var == "TTS_BASE_URL":
-                    if not cls._tts_base_configured() and not os.environ.get(
-                        "TTS_BASE_URL"
-                    ) and not os.environ.get("CHATTERBOX_TTS_URL"):
-                        missing.append(var)
-                    continue
-                if not getattr(settings, var, None) and not os.environ.get(var):
-                    missing.append(var)
+        """Django API orchestration only needs LiveKit (checked separately).
 
-            missing.extend(validate_stt_env())
-            return missing
+        STT, LLM, and TTS keys are validated by the LiveKit worker at startup.
+        """
+        with StepTimer(logger, "PROVIDERS", "validate_env"):
+            return []
 
     @classmethod
     def create_session(

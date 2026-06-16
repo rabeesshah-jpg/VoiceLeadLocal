@@ -138,6 +138,20 @@ class StartCallView(APIView):
             fallback_voice=tts_config.get("fallback_voice", ""),
             tts_voice=effective_tts_voice(tts_config),
         )
+        if voice_mode == "custom" and voice_profile:
+            log_block(
+                logger,
+                logging.INFO,
+                operation="START_CALL_SELECTED_VOICE_PROFILE",
+                step="voice_profile",
+                status="OK",
+                request_id=request_id,
+                voice_profile_id=str(voice_profile.id),
+                voice_profile_name=voice_profile.name,
+                provider_voice_id=tts_config.get("provider_voice_id", ""),
+                runpod_voice_uuid=voice_profile.runpod_voice_uuid or "",
+                fallback_voice=tts_config.get("fallback_voice", ""),
+            )
 
         lk_service = LiveKitTokenService()
         with StepTimer(logger, operation, "livekit_config", request_id=request_id):
@@ -157,47 +171,37 @@ class StartCallView(APIView):
                     status=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
 
-        with StepTimer(logger, operation, "provider_config", request_id=request_id):
-            provider_missing = SessionRegistry.validate_providers()
-            if provider_missing:
-                log_block(
-                    logger,
-                    logging.ERROR,
-                    operation=operation,
-                    step="provider_config",
-                    status="FAIL",
-                    request_id=request_id,
-                    missing=provider_missing,
+        tts_configured = bool(
+            getattr(settings, "TTS_BASE_URL", "")
+            or getattr(settings, "VOICE_PROFILE_TTS_BASE_URL", "")
+            or getattr(settings, "CHATTERBOX_TTS_URL", "")
+        )
+        if tts_configured and not getattr(settings, "VOICE_AGENT_SKIP_TTS_WARMUP", False):
+            with StepTimer(
+                logger,
+                operation,
+                "supertonic_handshake",
+                request_id=request_id,
+                persona_id=persona_id or "default",
+                note="optional_local_dev_only",
+            ):
+                warmup_voice = effective_tts_voice(tts_config)
+                handshake = run_supertonic_handshake(
+                    persona_id=persona_id,
+                    language=language,
+                    force=True,
+                    voice_override=warmup_voice,
                 )
-                return Response(
-                    {"error": "Voice providers are not configured.", "missing": provider_missing},
-                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
-                )
-
-        with StepTimer(
-            logger,
-            operation,
-            "supertonic_handshake",
-            request_id=request_id,
-            persona_id=persona_id or "default",
-        ):
-            warmup_voice = effective_tts_voice(tts_config)
-            handshake = run_supertonic_handshake(
-                persona_id=persona_id,
-                language=language,
-                force=True,
-                voice_override=warmup_voice,
-            )
-            if not handshake.get("ok") and not handshake.get("skipped"):
-                log_block(
-                    logger,
-                    logging.WARNING,
-                    operation=operation,
-                    step="supertonic_handshake",
-                    status="FAIL",
-                    request_id=request_id,
-                    detail=handshake,
-                )
+                if not handshake.get("ok") and not handshake.get("skipped"):
+                    log_block(
+                        logger,
+                        logging.WARNING,
+                        operation=operation,
+                        step="supertonic_handshake",
+                        status="FAIL",
+                        request_id=request_id,
+                        detail=handshake,
+                    )
 
         with StepTimer(
             logger,
@@ -370,6 +374,61 @@ class CallDetailView(APIView):
             if metrics:
                 data["metrics"] = metrics
             return Response(data)
+
+
+def _client_ts_iso(raw_ts) -> str:
+    from datetime import datetime, timezone
+
+    if raw_ts is None or raw_ts == "":
+        return "-"
+    try:
+        ms = int(raw_ts)
+        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat(
+            timespec="milliseconds"
+        )
+    except (TypeError, ValueError, OSError):
+        return str(raw_ts)
+
+
+def _format_ui_telemetry_line(*, event: str, fields: dict) -> str:
+    from datetime import datetime, timezone
+
+    server_ts = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    client_ts = _client_ts_iso(fields.get("ts"))
+    parts = [
+        f"event={event}",
+        f"server_ts={server_ts}",
+        f"client_ts={client_ts}",
+    ]
+    for key in sorted(fields):
+        if key in ("event", "ts"):
+            continue
+        value = fields[key]
+        if value is None or value == "":
+            continue
+        parts.append(f"{key}={value}")
+    return "UI_TELEMETRY | " + " | ".join(parts)
+
+
+class UiTelemetryView(APIView):
+    """Receive browser UI telemetry and write to voice_agent_ui_telemetry.log."""
+
+    authentication_classes = [DevApiKeyAuthentication]
+
+    def post(self, request):
+        ui_logger = logging.getLogger("apps.calls.ui_telemetry")
+        body = request.data if isinstance(request.data, dict) else {}
+        event = str(body.get("event") or "").strip()
+        if not event:
+            return Response({"error": "event is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        fields = {
+            k: v
+            for k, v in body.items()
+            if k != "event" and v is not None and v != ""
+        }
+        ui_logger.info(_format_ui_telemetry_line(event=event, fields=fields))
+        return Response({"ok": True}, status=status.HTTP_201_CREATED)
 
 
 class CallEventsView(APIView):

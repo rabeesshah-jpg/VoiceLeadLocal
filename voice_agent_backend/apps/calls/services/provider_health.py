@@ -22,25 +22,26 @@ def log_provider_env_status():
         return f"set (len={len(val)})"
 
     stt_missing = validate_stt_env()
+    database_url = (getattr(settings, "DATABASES", {}).get("default", {}).get("ENGINE", ""))
+    using_postgres = "postgresql" in database_url or "postgis" in database_url
     log_block(
         logger,
         logging.INFO,
         operation="API_STARTUP",
         step="provider_env",
         status="CHECK",
+        role="django_api",
+        database_engine=database_url or "unknown",
+        database_url_configured=using_postgres,
+        LIVEKIT_URL=settings.LIVEKIT_URL or "MISSING",
+        LIVEKIT_API_KEY=_hint("LIVEKIT_API_KEY"),
         STT_PROVIDER=get_stt_provider(),
         STT_CONFIG_OK="yes" if not stt_missing else "no",
         STT_MISSING=",".join(stt_missing) if stt_missing else "none",
         DEEPGRAM_API_KEY=_hint("DEEPGRAM_API_KEY")
         if is_deepgram_provider()
-        else "not_required",
-        OPENROUTER_API_KEY=_hint("OPENROUTER_API_KEY"),
-        TTS_BASE_URL=_hint("TTS_BASE_URL"),
-        TTS_VOICE=_hint("TTS_VOICE"),
-        TTS_LANG=settings.TTS_LANG or "en",
-        TTS_PROVIDER=getattr(settings, "TTS_PROVIDER", "multilingual"),
-        TTS_MODEL=settings.TTS_MODEL or "multilingual",
-        OPENROUTER_BASE_URL=settings.OPENROUTER_BASE_URL or "MISSING",
-        LIVEKIT_URL=settings.LIVEKIT_URL or "MISSING",
-        note="Provider keys should match repo root .env; LiveKit uses voice_agent_backend/.env only",
+        else "worker_only",
+        OPENROUTER_API_KEY=_hint("OPENROUTER_API_KEY") + " (worker_only)",
+        TTS_BASE_URL=_hint("TTS_BASE_URL") + " (worker_only; optional on API)",
+        note="Realtime STT/LLM/TTS run on LiveKit worker; Django orchestrates LiveKit + sessions",
     )

@@ -9,6 +9,8 @@ from pathlib import Path
 import httpx
 from django.conf import settings
 
+from config.step_log import log_block
+
 logger = logging.getLogger("apps.calls.services.tts_voice_clone")
 
 
@@ -28,11 +30,17 @@ def _tts_timeout_s() -> float:
     return float(getattr(settings, "TTS_TIMEOUT", 60))
 
 
-def _base_url() -> str:
+def resolve_voice_profile_tts_base_url() -> str:
+    """RunPod TTS URL for Django voice-profile admin (public URL from local Django)."""
     return (
-        getattr(settings, "TTS_BASE_URL", "")
+        getattr(settings, "VOICE_PROFILE_TTS_BASE_URL", "")
+        or getattr(settings, "TTS_BASE_URL", "")
         or getattr(settings, "CHATTERBOX_TTS_URL", "")
     ).strip().rstrip("/")
+
+
+def _base_url() -> str:
+    return resolve_voice_profile_tts_base_url()
 
 
 def _clone_endpoint() -> str:
@@ -137,29 +145,73 @@ def parse_runpod_voice_response(body: dict) -> dict:
 
 
 def fetch_voice_capabilities() -> dict:
-    """GET {TTS_BASE_URL}/v1/voices/capabilities"""
+    """GET {VOICE_PROFILE_TTS_BASE_URL}/v1/voices/capabilities"""
     base = _base_url()
     if not base:
-        return {"ok": False, "error": "TTS_BASE_URL is not configured"}
+        log_block(
+            logger,
+            logging.ERROR,
+            operation="VOICE_PROFILE_CAPABILITIES_REQUEST",
+            step="config",
+            status="FAIL",
+            error="VOICE_PROFILE_TTS_BASE_URL is not configured",
+        )
+        return {
+            "ok": False,
+            "error": "VOICE_PROFILE_TTS_BASE_URL is not configured",
+        }
 
     url = f"{base}/v1/voices/capabilities"
+    log_block(
+        logger,
+        logging.INFO,
+        operation="VOICE_PROFILE_CAPABILITIES_REQUEST",
+        step="http_get",
+        status="START",
+        url=url,
+        tts_base_url=base,
+    )
     try:
         with httpx.Client(timeout=_tts_timeout_s()) as client:
             resp = client.get(url)
         if resp.status_code >= 400:
+            log_block(
+                logger,
+                logging.ERROR,
+                operation="VOICE_PROFILE_CAPABILITIES_RESPONSE",
+                step="http_get",
+                status="FAIL",
+                url=url,
+                http_status=resp.status_code,
+                body_preview=resp.text[:300],
+            )
             return {
                 "ok": False,
                 "error": f"HTTP {resp.status_code}: {resp.text[:300]}",
             }
         data = resp.json()
-        logger.info(
-            "runpod_voice_capabilities supports_reference_audio_cloning=%s clone_endpoint=%s",
-            data.get("supports_reference_audio_cloning"),
-            data.get("clone_endpoint"),
+        log_block(
+            logger,
+            logging.INFO,
+            operation="VOICE_PROFILE_CAPABILITIES_RESPONSE",
+            step="http_get",
+            status="OK",
+            url=url,
+            supports_reference_audio_cloning=data.get("supports_reference_audio_cloning"),
+            supports_voice_builder_json=data.get("supports_voice_builder_json"),
+            clone_endpoint=data.get("clone_endpoint"),
         )
         return {"ok": True, **data}
     except Exception as exc:
-        logger.error("runpod_voice_capabilities_failed error=%s", exc)
+        log_block(
+            logger,
+            logging.ERROR,
+            operation="VOICE_PROFILE_CAPABILITIES_RESPONSE",
+            step="http_get",
+            status="FAIL",
+            url=url,
+            error=str(exc)[:400],
+        )
         return {"ok": False, "error": str(exc)}
 
 
@@ -178,37 +230,42 @@ def clone_voice_on_runpod(
     """
     base = _base_url()
     if not base:
-        raise ValueError("TTS_BASE_URL is not configured")
+        raise ValueError("VOICE_PROFILE_TTS_BASE_URL is not configured")
 
     url = f"{base}{_clone_endpoint()}"
     file_size = audio_path.stat().st_size
-    with audio_path.open("rb") as audio_file:
-        files = {"file": (filename, audio_file, content_type)}
-        data = {
-            "name": display_name,
-            "display_name": display_name,
-            "consent_confirmed": "true",
-        }
-        logger.info(
-            "runpod_voice_clone_request tts_base_url=%s url=%s name=%r "
-            "filename=%s size=%s content_type=%s",
-            base,
-            url,
-            display_name,
-            filename,
-            file_size,
-            content_type,
-        )
-        with httpx.Client(timeout=_clone_timeout_s()) as client:
-            resp = client.post(url, files=files, data=data)
-
-    logger.info(
-        "runpod_voice_clone_response http=%s content_type=%s bytes=%s body_preview=%s",
-        resp.status_code,
-        resp.headers.get("content-type", ""),
-        len(resp.content),
-        resp.text[:500],
+    log_block(
+        logger,
+        logging.INFO,
+        operation="VOICE_PROFILE_UPLOAD_START",
+        step="audio_clone",
+        status="START",
+        url=url,
+        display_name=display_name,
+        filename=filename,
+        file_size=file_size,
     )
+    try:
+        with audio_path.open("rb") as audio_file:
+            files = {"file": (filename, audio_file, content_type)}
+            data = {
+                "name": display_name,
+                "display_name": display_name,
+                "consent_confirmed": "true",
+            }
+            with httpx.Client(timeout=_clone_timeout_s()) as client:
+                resp = client.post(url, files=files, data=data)
+    except Exception as exc:
+        log_block(
+            logger,
+            logging.ERROR,
+            operation="VOICE_PROFILE_UPLOAD_FAILED",
+            step="audio_clone",
+            status="FAIL",
+            url=url,
+            error=str(exc)[:400],
+        )
+        raise
 
     try:
         body = resp.json()
@@ -217,19 +274,42 @@ def clone_voice_on_runpod(
 
     if resp.status_code == 422 or resp.status_code >= 400:
         detail = _extract_error_detail(body, resp.text[:500])
+        log_block(
+            logger,
+            logging.ERROR,
+            operation="VOICE_PROFILE_UPLOAD_FAILED",
+            step="audio_clone",
+            status="FAIL",
+            url=url,
+            http_status=resp.status_code,
+            error=detail[:400],
+        )
         raise RuntimeError(f"RunPod voice clone failed (HTTP {resp.status_code}): {detail}")
 
     if body.get("error"):
         detail = _extract_error_detail(body)
+        log_block(
+            logger,
+            logging.ERROR,
+            operation="VOICE_PROFILE_UPLOAD_FAILED",
+            step="audio_clone",
+            status="FAIL",
+            url=url,
+            error=detail[:400],
+        )
         raise RuntimeError(f"RunPod voice clone failed: {detail}")
 
     parsed = parse_runpod_voice_response(body)
-    logger.info(
-        "runpod_voice_clone_parsed voice_id=%s provider_voice_id=%s status=%s message=%s",
-        parsed["runpod_voice_uuid"] or "-",
-        parsed["provider_voice_id"] or "-",
-        parsed["status"],
-        (parsed.get("status_message") or "-")[:200],
+    log_block(
+        logger,
+        logging.INFO,
+        operation="VOICE_PROFILE_UPLOAD_SUCCESS",
+        step="audio_clone",
+        status="OK",
+        url=url,
+        voice_id=parsed["runpod_voice_uuid"] or "-",
+        provider_voice_id=parsed["provider_voice_id"] or "-",
+        runpod_status=parsed["status"],
     )
 
     if parsed["status"] == "stored_only":
@@ -267,35 +347,41 @@ def upload_voice_builder_json_on_runpod(
     """
     base = _base_url()
     if not base:
-        raise ValueError("TTS_BASE_URL is not configured")
+        raise ValueError("VOICE_PROFILE_TTS_BASE_URL is not configured")
 
     url = f"{base}{_upload_endpoint()}"
     file_size = json_path.stat().st_size
-    with json_path.open("rb") as json_file:
-        files = {"file": (filename, json_file, "application/json")}
-        data = {
-            "display_name": display_name,
-            "consent_confirmed": "true",
-        }
-        logger.info(
-            "runpod_voice_json_upload_request tts_base_url=%s url=%s display_name=%r "
-            "filename=%s size=%s",
-            base,
-            url,
-            display_name,
-            filename,
-            file_size,
-        )
-        with httpx.Client(timeout=_clone_timeout_s()) as client:
-            resp = client.post(url, files=files, data=data)
-
-    logger.info(
-        "runpod_voice_json_upload_response http=%s content_type=%s bytes=%s body_preview=%s",
-        resp.status_code,
-        resp.headers.get("content-type", ""),
-        len(resp.content),
-        resp.text[:500],
+    log_block(
+        logger,
+        logging.INFO,
+        operation="VOICE_PROFILE_UPLOAD_START",
+        step="voice_builder_json",
+        status="START",
+        url=url,
+        display_name=display_name,
+        filename=filename,
+        file_size=file_size,
     )
+    try:
+        with json_path.open("rb") as json_file:
+            files = {"file": (filename, json_file, "application/json")}
+            data = {
+                "display_name": display_name,
+                "consent_confirmed": "true",
+            }
+            with httpx.Client(timeout=_clone_timeout_s()) as client:
+                resp = client.post(url, files=files, data=data)
+    except Exception as exc:
+        log_block(
+            logger,
+            logging.ERROR,
+            operation="VOICE_PROFILE_UPLOAD_FAILED",
+            step="voice_builder_json",
+            status="FAIL",
+            url=url,
+            error=str(exc)[:400],
+        )
+        raise
 
     try:
         body = resp.json()
@@ -304,21 +390,44 @@ def upload_voice_builder_json_on_runpod(
 
     if resp.status_code == 422 or resp.status_code >= 400:
         detail = _extract_error_detail(body, resp.text[:500])
+        log_block(
+            logger,
+            logging.ERROR,
+            operation="VOICE_PROFILE_UPLOAD_FAILED",
+            step="voice_builder_json",
+            status="FAIL",
+            url=url,
+            http_status=resp.status_code,
+            error=detail[:400],
+        )
         raise RuntimeError(
             f"RunPod voice JSON upload failed (HTTP {resp.status_code}): {detail}"
         )
 
     if body.get("error"):
         detail = _extract_error_detail(body)
+        log_block(
+            logger,
+            logging.ERROR,
+            operation="VOICE_PROFILE_UPLOAD_FAILED",
+            step="voice_builder_json",
+            status="FAIL",
+            url=url,
+            error=detail[:400],
+        )
         raise RuntimeError(f"RunPod voice JSON upload failed: {detail}")
 
     parsed = parse_runpod_voice_response(body)
-    logger.info(
-        "runpod_voice_json_upload_parsed voice_id=%s provider_voice_id=%s status=%s message=%s",
-        parsed["runpod_voice_uuid"] or "-",
-        parsed["provider_voice_id"] or "-",
-        parsed["status"],
-        (parsed.get("status_message") or "-")[:200],
+    log_block(
+        logger,
+        logging.INFO,
+        operation="VOICE_PROFILE_UPLOAD_SUCCESS",
+        step="voice_builder_json",
+        status="OK",
+        url=url,
+        voice_id=parsed["runpod_voice_uuid"] or "-",
+        provider_voice_id=parsed["provider_voice_id"] or "-",
+        runpod_status=parsed["status"],
     )
 
     if parsed["status"] == "stored_only":

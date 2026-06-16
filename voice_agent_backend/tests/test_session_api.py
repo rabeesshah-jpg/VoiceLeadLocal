@@ -26,6 +26,17 @@ def test_health(api_client):
 
 
 @pytest.mark.django_db
+def test_ui_telemetry_post(api_client):
+    resp = api_client.post(
+        "/api/ui-telemetry/",
+        data={"event": "browser_audio_received", "participant": "agent-test"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 201
+    assert resp.json()["ok"] is True
+
+
+@pytest.mark.django_db
 def test_start_and_end_call(api_client):
     start = api_client.post(
         "/api/calls/start/",

@@ -37,9 +37,10 @@ export default function VoiceProfilePanel({
   onProfilesChange,
 }: Props) {
   const [profiles, setProfiles] = useState<VoiceProfile[]>([]);
-  const [cloningEnabled, setCloningEnabled] = useState(true);
+  const [capabilitiesLoaded, setCapabilitiesLoaded] = useState(false);
+  const [cloningEnabled, setCloningEnabled] = useState(false);
   const [supportsAudioClone, setSupportsAudioClone] = useState(false);
-  const [supportsJsonUpload, setSupportsJsonUpload] = useState(true);
+  const [supportsJsonUpload, setSupportsJsonUpload] = useState(false);
   const [capabilitiesMessage, setCapabilitiesMessage] = useState('');
   const [loading, setLoading] = useState(true);
   const [phase, setPhase] = useState<VoicePanelPhase>('idle');
@@ -70,10 +71,11 @@ export default function VoiceProfilePanel({
     setLoading(true);
     try {
       const data = await listVoiceProfiles();
-      setCloningEnabled(data.voice_cloning_enabled);
+      setCloningEnabled(Boolean(data.voice_cloning_enabled));
       setSupportsAudioClone(Boolean(data.supports_reference_audio_cloning));
-      setSupportsJsonUpload(data.supports_voice_builder_json ?? true);
-      setCapabilitiesMessage(data.capabilities_message || '');
+      setSupportsJsonUpload(Boolean(data.supports_voice_builder_json));
+      setCapabilitiesMessage(data.capabilities_message?.trim() || '');
+      setCapabilitiesLoaded(true);
       updateProfiles(data.profiles);
       if (!didAutoSelectRef.current) {
         const defaultProfile = data.profiles.find((p) => p.is_default && isVoiceProfileUsable(p));
@@ -232,7 +234,8 @@ export default function VoiceProfilePanel({
       setError(null);
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Upload failed';
-      setError(msg);
+      logError('VOICE_PROFILE_UPLOAD_FAILED', { method: 'audio_clone', message: msg });
+      setError(`Voice profile upload failed: ${msg}`);
       setPhase('failed');
       await refreshProfiles();
     }
@@ -264,7 +267,8 @@ export default function VoiceProfilePanel({
       setError(null);
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'JSON upload failed';
-      setError(msg);
+      logError('VOICE_PROFILE_UPLOAD_FAILED', { method: 'voice_builder_json', message: msg });
+      setError(`Voice profile upload failed: ${msg}`);
       setPhase('failed');
       await refreshProfiles();
     }
@@ -336,10 +340,19 @@ export default function VoiceProfilePanel({
   const busy =
     phase === 'uploading' || phase === 'processing' || phase === 'testing';
 
-  if (!cloningEnabled) {
+  if (loading && !capabilitiesLoaded) {
     return (
       <p className="voice-profile-hint" role="status">
-        Custom voice profiles are disabled on this server. Use preset M1/F1.
+        Loading voice profile capabilities…
+      </p>
+    );
+  }
+
+  if (capabilitiesLoaded && !cloningEnabled) {
+    return (
+      <p className="voice-profile-hint" role="status">
+        {capabilitiesMessage ||
+          'Custom voice profiles are disabled on this server. Use preset M1/F1.'}
       </p>
     );
   }
@@ -353,7 +366,18 @@ export default function VoiceProfilePanel({
         id="voice-profile-select"
         className="voice-select voice-select--wide"
         value={selectedProfileId ?? ''}
-        onChange={(e) => onSelectProfile(e.target.value || null)}
+        onChange={(e) => {
+          const nextId = e.target.value || null;
+          onSelectProfile(nextId);
+          const profile = nextId ? profiles.find((p) => p.id === nextId) : null;
+          log('VOICE_PROFILE_SELECTED', {
+            voice_profile_id: nextId,
+            name: profile?.name ?? null,
+            status: profile?.status ?? null,
+            provider_voice_id: profile?.provider_voice_id ?? null,
+            usable: profile ? isVoiceProfileUsable(profile) : false,
+          });
+        }}
         disabled={disabled || loading}
         aria-label="Select cloned voice profile"
       >

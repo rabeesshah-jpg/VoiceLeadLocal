@@ -65,13 +65,6 @@ def build_tts_metadata_for_call(
         cfg["voice_id"] = provider_id
         if voice_profile.runpod_voice_uuid:
             cfg["runpod_voice_uuid"] = voice_profile.runpod_voice_uuid
-        from django.conf import settings as django_settings
-
-        cfg["tts_base_url"] = (
-            getattr(django_settings, "TTS_BASE_URL", "")
-            or getattr(django_settings, "CHATTERBOX_TTS_URL", "")
-            or ""
-        ).strip()
 
     return cfg
 

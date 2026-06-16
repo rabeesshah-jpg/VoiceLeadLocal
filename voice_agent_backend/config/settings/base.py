@@ -103,7 +103,11 @@ OPENROUTER_BASE_URL = env("OPENROUTER_BASE_URL", default="https://openrouter.ai/
 VOICE_AGENT_LLM_MODEL = env("VOICE_AGENT_LLM_MODEL", default="openai/gpt-4o-mini")
 # TTS: supertonic (POST /v1/tts) or multilingual (POST /tts_to_audio/)
 TTS_PROVIDER = env("TTS_PROVIDER", default="supertonic")
-TTS_BASE_URL = env("TTS_BASE_URL", default="http://172.16.2.158:7788")
+# Optional on Django API (worker calls TTS). Set only for local all-in-one dev or voice-profile admin.
+TTS_BASE_URL = env("TTS_BASE_URL", default="")
+# Local Django → RunPod TTS public URL for voice-profile clone/upload/capabilities only.
+# Worker on RunPod continues to use TTS_BASE_URL=http://127.0.0.1:7788 separately.
+VOICE_PROFILE_TTS_BASE_URL = env("VOICE_PROFILE_TTS_BASE_URL", default="")
 TTS_MODEL = env("TTS_MODEL", default="multilingual")
 TTS_VOICE = env("TTS_VOICE", default="M1")
 TTS_LANG = env("TTS_LANG", default="en")

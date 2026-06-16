@@ -6,6 +6,7 @@ from apps.calls.views import (
     EndCallView,
     HealthView,
     StartCallView,
+    UiTelemetryView,
 )
 from apps.calls.voice_profile_views import (
     CloneVoiceProfileView,
@@ -19,6 +20,7 @@ from apps.calls.voice_profile_views import (
 
 urlpatterns = [
     path("health/", HealthView.as_view(), name="health"),
+    path("ui-telemetry/", UiTelemetryView.as_view(), name="ui-telemetry"),
     path("voice-profiles/", VoiceProfileListView.as_view(), name="voice-profiles-list"),
     path(
         "voice-profiles/clone/",

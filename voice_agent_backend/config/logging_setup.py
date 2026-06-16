@@ -14,9 +14,11 @@ LOG_DIR_NAME = "logs"
 API_LOG_NAME = "voice_agent_api.log"
 WORKER_LOG_NAME = "voice_agent_worker.log"
 PIPELINE_LATENCY_LOG_NAME = "voice_agent_pipeline_latency.log"
+UI_TELEMETRY_LOG_NAME = "voice_agent_ui_telemetry.log"
 COMBINED_LOG_NAME = "voice_agent.log"
 
 _api_configured = False
+_ui_telemetry_configured = False
 _worker_configured = False
 _pipeline_latency_configured = False
 
@@ -109,6 +111,22 @@ def setup_api_logging(base_dir: Path) -> Path:
             "apps.calls.services",
             "django.request",
         ),
+    )
+    return log_path
+
+
+def setup_ui_telemetry_logging(base_dir: Path) -> Path:
+    """Browser UI telemetry (audio received, playback, transcript rendered)."""
+    global _ui_telemetry_configured
+    if _ui_telemetry_configured:
+        return _log_dir(base_dir) / UI_TELEMETRY_LOG_NAME
+    _ui_telemetry_configured = True
+
+    log_path = _log_dir(base_dir) / UI_TELEMETRY_LOG_NAME
+    _attach_file_handler(
+        log_path=log_path,
+        process_label="UI TELEMETRY (browser → API)",
+        logger_names=("apps.calls.ui_telemetry",),
     )
     return log_path
 

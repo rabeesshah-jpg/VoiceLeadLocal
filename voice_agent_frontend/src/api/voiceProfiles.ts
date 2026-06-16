@@ -55,10 +55,12 @@ export async function listVoiceProfiles(): Promise<VoiceProfileListResponse> {
     throw new Error(await parseError(res, 'list_voice_profiles'));
   }
   const body = (await res.json()) as VoiceProfileListResponse;
-  log('voice_profiles_loaded', {
-    count: body.profiles.length,
-    supportsAudioClone: body.supports_reference_audio_cloning,
-    supportsJsonUpload: body.supports_voice_builder_json,
+  log('VOICE_PROFILE_CAPABILITIES_LOADED', {
+    voice_cloning_enabled: body.voice_cloning_enabled,
+    supports_reference_audio_cloning: body.supports_reference_audio_cloning ?? false,
+    supports_voice_builder_json: body.supports_voice_builder_json ?? false,
+    capabilities_message: body.capabilities_message ?? '',
+    profile_count: body.profiles.length,
   });
   return body;
 }
@@ -75,7 +77,12 @@ export async function cloneVoiceProfile(
   form.append('audio', audioBlob, filename);
   form.append('consent_confirmed', consentConfirmed ? 'true' : 'false');
 
-  log('voice_profile_clone_request', { name, filename, size: audioBlob.size });
+  log('VOICE_PROFILE_UPLOAD_STARTED', {
+    method: 'audio_clone',
+    name,
+    filename,
+    size: audioBlob.size,
+  });
   const res = await fetch(url, {
     method: 'POST',
     headers: authHeaders(),
@@ -86,27 +93,34 @@ export async function cloneVoiceProfile(
 
   if (!res.ok) {
     const message = body.error || (await parseError(res, 'clone_voice_profile'));
-    logError('voice_profile_clone_failed', { message, status: res.status, body });
+    logError('VOICE_PROFILE_UPLOAD_FAILED', {
+      method: 'audio_clone',
+      message,
+      status: res.status,
+      body,
+    });
     throw new Error(message);
   }
 
   if (!isVoiceProfileUsable(body)) {
-    logWarn('voice_profile_clone_not_ready', {
+    const message =
+      body.error_message ||
+      `Voice clone not ready (status=${body.status}). provider_voice_id missing.`;
+    logError('VOICE_PROFILE_UPLOAD_FAILED', {
+      method: 'audio_clone',
+      message,
       id: body.id,
       status: body.status,
-      providerVoiceId: body.provider_voice_id || null,
-      error: body.error_message,
+      provider_voice_id: body.provider_voice_id || null,
     });
-    throw new Error(
-      body.error_message ||
-        `Voice clone not ready (status=${body.status}). provider_voice_id missing.`,
-    );
+    throw new Error(message);
   }
 
-  log('voice_profile_clone_success', {
+  log('VOICE_PROFILE_UPLOAD_SUCCESS', {
+    method: 'audio_clone',
     id: body.id,
     status: body.status,
-    providerVoiceId: body.provider_voice_id,
+    provider_voice_id: body.provider_voice_id,
     name: body.name,
   });
   return body;
@@ -123,8 +137,9 @@ export async function uploadJsonVoiceProfile(
   form.append('display_name', displayName);
   form.append('consent_confirmed', consentConfirmed ? 'true' : 'false');
 
-  log('voice_profile_json_upload_request', {
-    displayName,
+  log('VOICE_PROFILE_UPLOAD_STARTED', {
+    method: 'voice_builder_json',
+    display_name: displayName,
     filename: file.name,
     size: file.size,
   });
@@ -138,27 +153,34 @@ export async function uploadJsonVoiceProfile(
 
   if (!res.ok) {
     const message = body.error || (await parseError(res, 'upload_json_voice_profile'));
-    logError('voice_profile_json_upload_failed', { message, status: res.status, body });
+    logError('VOICE_PROFILE_UPLOAD_FAILED', {
+      method: 'voice_builder_json',
+      message,
+      status: res.status,
+      body,
+    });
     throw new Error(message);
   }
 
   if (!isVoiceProfileUsable(body)) {
-    logWarn('voice_profile_json_upload_not_ready', {
+    const message =
+      body.error_message ||
+      `Voice JSON upload not ready (status=${body.status}). provider_voice_id missing.`;
+    logError('VOICE_PROFILE_UPLOAD_FAILED', {
+      method: 'voice_builder_json',
+      message,
       id: body.id,
       status: body.status,
-      providerVoiceId: body.provider_voice_id || null,
-      error: body.error_message,
+      provider_voice_id: body.provider_voice_id || null,
     });
-    throw new Error(
-      body.error_message ||
-        `Voice JSON upload not ready (status=${body.status}). provider_voice_id missing.`,
-    );
+    throw new Error(message);
   }
 
-  log('voice_profile_json_upload_success', {
+  log('VOICE_PROFILE_UPLOAD_SUCCESS', {
+    method: 'voice_builder_json',
     id: body.id,
     status: body.status,
-    providerVoiceId: body.provider_voice_id,
+    provider_voice_id: body.provider_voice_id,
     name: body.name,
   });
   return body;

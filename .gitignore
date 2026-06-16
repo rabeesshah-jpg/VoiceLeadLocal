@@ -1,6 +1,46 @@
-# Local / accidental files
-To
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
 
-# TTS/STT dev scripts and generated audio (not part of the app)
-test_tts_stream.py
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+
+# Django
+db.sqlite3
+media/
+staticfiles/
+logs/
+*.log
+
+# Frontend
+node_modules/
+dist/
+build/
+.next/
+coverage/
+
+# IDE and operating system
+.idea/
+.vscode/
+.DS_Store
+
+# Generated audio and output files
+outputs/
+output/
 *.wav
+*.mp3
+
+# AI model files
+*.pt
+*.pth
+*.ckpt
+*.safetensors

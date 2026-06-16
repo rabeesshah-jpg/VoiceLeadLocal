@@ -238,9 +238,17 @@ async def warmup_supertonic_connection(
             "lang": lang,
         }
 
+    from agent.worker_env import resolve_tts_health_url
+
+    health_url = resolve_tts_health_url()
+    if health_url.startswith(base):
+        probe_url = health_url
+    else:
+        probe_url = f"{base}/v1/health"
+
     t0 = time.perf_counter()
     try:
-        async with session.get(f"{base}/v1/health") as resp:
+        async with session.get(probe_url) as resp:
             health = await resp.json() if resp.status == 200 else {}
             if resp.status != 200:
                 return {

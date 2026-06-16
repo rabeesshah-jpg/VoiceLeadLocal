@@ -13,6 +13,11 @@ export interface TelemetryPayload {
   tts_first_chunk_ms?: number;
   tts_total_ms?: number;
   tts_call_count?: number;
+  total_ms?: number;
+  e2e_to_first_audio_ms?: number;
+  stt_speech_end_to_final_ms?: number;
+  stt_total_ms?: number;
+  llm_total_ms?: number;
   component?: string;
   metric?: string;
 }
@@ -30,6 +35,11 @@ export interface TurnLatencyMetrics {
   ttsStatus: MilestoneStatus;
   ttsTotalMs: number | null;
   ttsCallCount: number | null;
+  sttMs: number | null;
+  sttStatus: MilestoneStatus;
+  llmTotalMs: number | null;
+  e2eFirstAudioMs: number | null;
+  totalMs: number | null;
 }
 
 export const initialTurnLatencyMetrics: TurnLatencyMetrics = {
@@ -43,6 +53,11 @@ export const initialTurnLatencyMetrics: TurnLatencyMetrics = {
   ttsStatus: 'idle',
   ttsTotalMs: null,
   ttsCallCount: null,
+  sttMs: null,
+  sttStatus: 'idle',
+  llmTotalMs: null,
+  e2eFirstAudioMs: null,
+  totalMs: null,
 };
 
 const LLM_MILESTONE_EVENTS = new Set([
@@ -103,6 +118,11 @@ export function startNewTurnMetrics(_prev?: TurnLatencyMetrics): TurnLatencyMetr
     ttsStatus: 'waiting',
     ttsTotalMs: null,
     ttsCallCount: null,
+    sttMs: null,
+    sttStatus: 'waiting',
+    llmTotalMs: null,
+    e2eFirstAudioMs: null,
+    totalMs: null,
   };
 }
 
@@ -183,6 +203,33 @@ export function applyTurnSummaryLatency(
     next.ttsCallCount = msg.tts_call_count;
   }
 
+  const sttMs = readMs(
+    msg.stt_ms,
+    msg.stt_speech_end_to_final_ms,
+    msg.stt_total_ms,
+  );
+  if (sttMs !== null) {
+    next.sttMs = sttMs;
+    next.sttStatus = 'received';
+  } else if (next.sttStatus === 'waiting') {
+    next.sttStatus = 'not_received';
+  }
+
+  const llmTotal = readMs(msg.llm_total_ms);
+  if (llmTotal !== null) {
+    next.llmTotalMs = llmTotal;
+  }
+
+  const e2e = readMs(msg.e2e_to_first_audio_ms);
+  if (e2e !== null) {
+    next.e2eFirstAudioMs = e2e;
+  }
+
+  const total = readMs(msg.total_ms);
+  if (total !== null) {
+    next.totalMs = total;
+  }
+
   return next;
 }
 
@@ -194,5 +241,6 @@ export function finalizeWaitingMilestones(metrics: TurnLatencyMetrics): TurnLate
     turnActive: false,
     llmStatus: metrics.llmStatus === 'waiting' ? 'not_received' : metrics.llmStatus,
     ttsStatus: metrics.ttsStatus === 'waiting' ? 'not_received' : metrics.ttsStatus,
+    sttStatus: metrics.sttStatus === 'waiting' ? 'not_received' : metrics.sttStatus,
   };
 }

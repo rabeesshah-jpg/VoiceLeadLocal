@@ -19,17 +19,26 @@ describe('latencyEvents', () => {
     const result = applyTurnSummaryLatency(active, {
       type: 'latency',
       turn_id: 'abc123',
+      stt_ms: 180,
       llm_start_ms: 320,
       llm_first_token_ms: 420,
+      llm_total_ms: 890,
       tts_ttfb_ms: 760,
       tts_total_ms: 2100,
       tts_call_count: 3,
+      e2e_to_first_audio_ms: 1450,
+      total_ms: 3200,
     });
     expect(result.turnId).toBe('abc123');
+    expect(result.sttMs).toBe(180);
+    expect(result.sttStatus).toBe('received');
     expect(result.llmFirstTokenMs).toBe(320);
+    expect(result.llmTotalMs).toBe(890);
     expect(result.ttsFirstChunkMs).toBe(760);
     expect(result.ttsTotalMs).toBe(2100);
     expect(result.ttsCallCount).toBe(3);
+    expect(result.e2eFirstAudioMs).toBe(1450);
+    expect(result.totalMs).toBe(3200);
     expect(result.llmStatus).toBe('received');
     expect(result.ttsStatus).toBe('received');
     expect(result.turnActive).toBe(false);

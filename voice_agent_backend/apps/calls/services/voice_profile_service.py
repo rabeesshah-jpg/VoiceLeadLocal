@@ -71,10 +71,17 @@ def get_voice_clone_capabilities() -> dict:
             "message": "Voice cloning is disabled in server config.",
         }
     if not caps.get("ok"):
+        err = caps.get("error", "Could not reach RunPod TTS capabilities.")
+        hint = (
+            " Set VOICE_PROFILE_TTS_BASE_URL in voice_agent_backend/.env to your "
+            "RunPod TTS public URL (e.g. http://<ip>:<port>)."
+        )
+        if "not configured" in str(err).lower():
+            err = f"{err}.{hint}"
         return {
             "voice_cloning_enabled": False,
             "supports_reference_audio_cloning": False,
-            "message": caps.get("error", "Could not reach RunPod TTS capabilities."),
+            "message": err,
         }
     supports_audio = bool(caps.get("supports_reference_audio_cloning"))
     supports_json = bool(caps.get("supports_voice_builder_json", True))

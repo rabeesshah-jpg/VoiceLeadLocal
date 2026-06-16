@@ -20,6 +20,10 @@ _BACKEND_ROOT = Path(__file__).resolve().parent.parent
 if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 
+from agent.worker_env import enforce_worker_runtime_policy
+
+enforce_worker_runtime_policy()
+
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.dev")
 
 from config.logging_setup import setup_worker_logging
@@ -196,13 +200,15 @@ def _build_session(
         stt = build_stt(language, http_session=stt_http_session)
 
     aec_warmup = _env_float("VOICE_AGENT_AEC_WARMUP_S", 1.0)
-    llm_model = _env("VOICE_AGENT_LLM_MODEL", "openai/gpt-4o-mini")
+    from agent.worker_env import resolve_openrouter_model, resolve_tts_base_url
+
+    llm_model = resolve_openrouter_model()
     with StepTimer(logger, operation, "init_openrouter_llm", model=llm_model):
         llm = build_openrouter_llm()
 
     from apps.calls.services.voice_tts_config import effective_tts_voice
 
-    tts_base = _env("TTS_BASE_URL") or _env("CHATTERBOX_TTS_URL", "http://127.0.0.1:7788")
+    tts_base = resolve_tts_base_url()
     tts_cfg = tts_config or {}
     tts_voice = effective_tts_voice(tts_cfg)
     tts_lang = str(tts_cfg.get("lang") or _env("TTS_LANG", "en"))
@@ -395,7 +401,9 @@ async def entrypoint(ctx: JobContext):
 
     await log_call_event(room_name, "worker_joined", {"job_id": job_id})
 
-    tts_base = _env("TTS_BASE_URL") or _env("CHATTERBOX_TTS_URL", "http://127.0.0.1:7788")
+    from agent.worker_env import resolve_openrouter_model, resolve_tts_base_url
+
+    tts_base = resolve_tts_base_url()
     tts_voice = effective_voice
     tts_lang = str(tts_config.get("lang") or _env("TTS_LANG", "en"))
 
@@ -403,7 +411,7 @@ async def entrypoint(ctx: JobContext):
 
     prewarmed_vad = ctx.proc.userdata.get("vad")
     stt_http = await ensure_stt_http_session()
-    llm_model = _env("VOICE_AGENT_LLM_MODEL", "openai/gpt-4o-mini")
+    llm_model = resolve_openrouter_model()
     pipeline_holder[0].configure_providers(
         stt_provider=get_stt_provider(),
         tts_provider=get_tts_provider(),
@@ -1182,26 +1190,46 @@ async def _get_session_async(room_name: str):
 
 def _startup_provider_checks():
     from agent.providers.supertonic_health import check_supertonic_on_startup
+    from agent.worker_env import (
+        cuda_visible_devices,
+        database_url_configured,
+        deepgram_remote_client,
+        openrouter_remote_client,
+        resolve_tts_base_url,
+        resolve_tts_health_url,
+        tts_health_check_label,
+        worker_cpu_only,
+        worker_env,
+    )
 
+    livekit_url = _env("LIVEKIT_URL")
+    tts_result = check_supertonic_on_startup()
+    health_ok = tts_result.get("health", {}).get("ok")
     log_block(
         logger,
         logging.INFO,
         operation="WORKER",
         step="env_keys_present",
         status="CHECK",
+        worker_env=worker_env(),
+        worker_cpu_only=worker_cpu_only(),
+        cuda_visible_devices=cuda_visible_devices(),
+        livekit_url_present=bool(livekit_url),
+        livekit_url=livekit_url or "MISSING",
+        database_url_configured=database_url_configured(),
         stt_provider=get_stt_provider(),
-        stt_ws_url=_env("STT_WS_URL") or "derived_from_STT_BASE_URL",
-        deepgram_enabled=is_deepgram_provider(),
-        deepgram_key_set=bool(_env("DEEPGRAM_API_KEY")),
-        openrouter=bool(_env("OPENROUTER_API_KEY")),
-        tts_base_url=_env("TTS_BASE_URL") or _env("CHATTERBOX_TTS_URL") or "default",
+        stt_ws_url=_env("STT_WS_URL") or "not_used_on_runpod",
+        deepgram_remote_client=deepgram_remote_client(),
+        openrouter_remote_client=openrouter_remote_client(),
+        tts_base_url=resolve_tts_base_url(),
+        tts_health_url=resolve_tts_health_url(),
+        tts_health_check=tts_health_check_label(health_ok),
+        tts_warmup_ok=tts_result.get("ok"),
         tts_provider=get_tts_provider(),
-        tts_voice=_env("TTS_VOICE", "female"),
+        tts_voice=_env("TTS_VOICE", "M1"),
         tts_lang=_env("TTS_LANG", "en"),
-        openrouter_model=_env("VOICE_AGENT_LLM_MODEL", "openai/gpt-4o-mini"),
-        livekit_url=_env("LIVEKIT_URL"),
+        openrouter_model=resolve_openrouter_model(),
     )
-    check_supertonic_on_startup()
 
 
 def _worker_prewarm(proc: JobProcess) -> None:
