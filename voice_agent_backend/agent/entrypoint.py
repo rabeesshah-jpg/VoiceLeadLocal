@@ -20,7 +20,7 @@ _BACKEND_ROOT = Path(__file__).resolve().parent.parent
 if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 
-from agent.worker_env import enforce_worker_runtime_policy
+from agent.worker_env import enforce_worker_runtime_policy, resolve_openrouter_model
 
 enforce_worker_runtime_policy()
 
