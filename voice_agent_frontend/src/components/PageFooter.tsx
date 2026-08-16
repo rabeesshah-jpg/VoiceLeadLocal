@@ -7,7 +7,7 @@ export default function PageFooter() {
 
   return (
     <footer className="page-footer">
-      <span className="page-footer-copy">&copy; {year} | Voice Agent</span>
+      <span className="page-footer-copy">&copy; {year} | Agent Nora</span>
       <ThemeToggle theme={theme} onChange={setTheme} />
     </footer>
   );
