@@ -33,8 +33,8 @@ export default function ChatHeader({
           <IconAssistant />
         </div>
         <div className="chat-header-titles">
-          <span className="chat-title">Voice calling agent</span>
-          <span className="chat-subtitle">Speak to connect</span>
+          <span className="chat-title">Agent Nora</span>
+          <span className="chat-subtitle">Speak To Connect</span>
         </div>
       </div>
       <div className="chat-header-right">

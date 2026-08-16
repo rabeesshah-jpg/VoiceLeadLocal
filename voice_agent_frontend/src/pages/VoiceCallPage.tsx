@@ -17,7 +17,6 @@ import AudioVisualizer from '../components/AudioVisualizer';
 import RoomDataBinder from '../components/RoomDataBinder';
 import BrowserAudioTelemetry from '../components/BrowserAudioTelemetry';
 import MuteSync from '../components/MuteSync';
-import PageHeader from '../components/PageHeader';
 import IntroSection from '../components/IntroSection';
 import ChatHeader from '../components/ChatHeader';
 import CallEmptyState from '../components/CallEmptyState';
@@ -148,91 +147,90 @@ export default function VoiceCallPage() {
       : 'Voice profile is still processing or not ready.'
     : null;
 
-  return (
-    <div className="page">
-      <PageHeader />
-      <IntroSection />
-
-      <section className="chat-card" aria-label="Voice calling agent">
-        <ChatHeader
-          connection={connectionState as 'idle' | 'live' | 'error'}
-          agentState={transcriptState.agentState}
-          inCall={inCall}
-          muted={muted}
-          onToggleMute={() => setMuted((m) => !m)}
-        />
-
-        {displayError && (
-          <div className="error-banner" role="alert">
-            {displayError}
-          </div>
-        )}
-
-        <div className="chat-body">
-          {showEmptyState ? (
-            <CallEmptyState />
-          ) : (
-            <>
-              {hasMessages && <TranscriptPanel state={transcriptState} />}
-              {inCall && (
-                <AudioVisualizer
-                  agentState={transcriptState.agentState}
-                  awaitingIntroduction={transcriptState.agentState === 'idle'}
-                />
-              )}
-              {!hasMessages && inCall && transcriptState.agentState === 'idle' && (
-                <p className="chat-body-hint">Connecting to agent…</p>
-              )}
-            </>
+    return (
+      <div className="page">
+        <IntroSection />
+  
+        <section className="chat-card" aria-label="Voice calling agent">
+          <ChatHeader
+            connection={connectionState as 'idle' | 'live' | 'error'}
+            agentState={transcriptState.agentState}
+            inCall={inCall}
+            muted={muted}
+            onToggleMute={() => setMuted((m) => !m)}
+          />
+  
+          {displayError && (
+            <div className="error-banner" role="alert">
+              {displayError}
+            </div>
           )}
-        </div>
-
-        <CallFooter
-          voiceMode={voiceMode}
-          onVoiceModeChange={setVoiceMode}
-          voice={voice}
-          onVoiceChange={setVoice}
-          voiceProfileId={voiceProfileId}
-          onVoiceProfileChange={setVoiceProfileId}
-          voiceProfiles={voiceProfiles}
-          onVoiceProfilesChange={setVoiceProfiles}
-          language={language}
-          onLanguageChange={setLanguage}
-          inCall={inCall}
-          busy={busy}
-          startDisabled={customVoiceBlocked}
-          startDisabledReason={startDisabledReason}
-          onCall={handleCallAction}
-        />
-      </section>
-
-      {inCall && <LatencyPanel metrics={transcriptState.turnMetrics} />}
-
-      {session && (
-        <LiveKitRoom
-          key={session.call_id}
-          serverUrl={session.livekit_url}
-          token={session.participant_token}
-          connect
-          audio
-          video={false}
-          onConnected={() => log('ui_livekit_connected', { room: session.room_name })}
-          onDisconnected={() => {
-            log('ui_livekit_disconnected', { room: session.room_name });
-          }}
-          onError={(err) => {
-            logError('ui_livekit_error', { message: err.message });
-            setApiError(err.message);
-          }}
-        >
-          <RoomDataBinder bindRoom={bindRoom} />
-          <BrowserAudioTelemetry />
-          <MuteSync muted={muted} />
-          <RoomAudioRenderer />
-        </LiveKitRoom>
-      )}
-
-      <PageFooter />
-    </div>
-  );
-}
+  
+          <div className="chat-body">
+            {showEmptyState ? (
+              <CallEmptyState />
+            ) : (
+              <>
+                {hasMessages && <TranscriptPanel state={transcriptState} />}
+                {inCall && (
+                  <AudioVisualizer
+                    agentState={transcriptState.agentState}
+                    awaitingIntroduction={transcriptState.agentState === 'idle'}
+                  />
+                )}
+                {!hasMessages && inCall && transcriptState.agentState === 'idle' && (
+                  <p className="chat-body-hint">Connecting to agent…</p>
+                )}
+              </>
+            )}
+          </div>
+  
+          <CallFooter
+            voiceMode={voiceMode}
+            onVoiceModeChange={setVoiceMode}
+            voice={voice}
+            onVoiceChange={setVoice}
+            voiceProfileId={voiceProfileId}
+            onVoiceProfileChange={setVoiceProfileId}
+            voiceProfiles={voiceProfiles}
+            onVoiceProfilesChange={setVoiceProfiles}
+            language={language}
+            onLanguageChange={setLanguage}
+            inCall={inCall}
+            busy={busy}
+            startDisabled={customVoiceBlocked}
+            startDisabledReason={startDisabledReason}
+            onCall={handleCallAction}
+          />
+        </section>
+  
+        {inCall && <LatencyPanel metrics={transcriptState.turnMetrics} />}
+  
+        {session && (
+          <LiveKitRoom
+            key={session.call_id}
+            serverUrl={session.livekit_url}
+            token={session.participant_token}
+            connect
+            audio
+            video={false}
+            onConnected={() => log('ui_livekit_connected', { room: session.room_name })}
+            onDisconnected={() => {
+              log('ui_livekit_disconnected', { room: session.room_name });
+            }}
+            onError={(err) => {
+              logError('ui_livekit_error', { message: err.message });
+              setApiError(err.message);
+            }}
+          >
+            <RoomDataBinder bindRoom={bindRoom} />
+            <BrowserAudioTelemetry />
+            <MuteSync muted={muted} />
+            <RoomAudioRenderer />
+          </LiveKitRoom>
+        )}
+  
+        <PageFooter />
+      </div>
+    );
+  }
