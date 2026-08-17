@@ -122,3 +122,42 @@ class CallEvent(models.Model):
 
     class Meta:
         ordering = ["created_at"]
+
+
+class Lead(models.Model):
+    INTENT_HOT = "hot"
+    INTENT_WARM = "warm"
+    INTENT_COLD = "cold"
+
+    INTENT_CHOICES = [
+        (INTENT_HOT, "Hot"),
+        (INTENT_WARM, "Warm"),
+        (INTENT_COLD, "Cold"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    session = models.OneToOneField(
+        CallSession, on_delete=models.CASCADE, related_name="lead"
+    )
+    name = models.CharField(max_length=128, blank=True, default="")
+    company = models.CharField(max_length=128, blank=True, default="")
+    whatsapp_number = models.CharField(max_length=32, blank=True, default="")
+    city = models.CharField(max_length=64, blank=True, default="")
+    need = models.TextField(blank=True, default="")
+    has_existing_website = models.BooleanField(null=True, blank=True)
+    website_action = models.CharField(max_length=32, blank=True, default="")  # "upgrade" | "new"
+    business_description = models.TextField(blank=True, default="")
+    start_timeline = models.CharField(max_length=128, blank=True, default="")
+    lead_intent = models.CharField(
+        max_length=16, choices=INTENT_CHOICES, blank=True, default=""
+    )
+    appointment_time = models.CharField(max_length=128, blank=True, default="")
+    appointment_confirmed = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.name or 'Unknown'} — {self.session.room_name}"

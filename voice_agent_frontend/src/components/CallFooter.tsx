@@ -53,7 +53,7 @@ export default function CallFooter({
   return (
     <div className="call-footer">
       <div className="voice-mode-section">
-        <span className="voice-select-label">Voice mode</span>
+        <span className="voice-select-label">Voice Mode</span>
         <div className="voice-mode-toggle" role="radiogroup" aria-label="Voice mode">
           <label className="voice-mode-option">
             <input
@@ -64,7 +64,7 @@ export default function CallFooter({
               onChange={() => onVoiceModeChange('preset')}
               disabled={inCall || busy}
             />
-            Preset voice
+            Preset Voice
           </label>
           <label className="voice-mode-option">
             <input
@@ -75,7 +75,7 @@ export default function CallFooter({
               onChange={() => onVoiceModeChange('custom')}
               disabled={inCall || busy}
             />
-            Custom voice
+            Custom Voice
           </label>
         </div>
       </div>

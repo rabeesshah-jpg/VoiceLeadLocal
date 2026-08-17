@@ -6,8 +6,9 @@ import logging
 import time
 from collections.abc import AsyncIterable, Callable
 
+from asgiref.sync import sync_to_async
 from livekit import rtc
-from livekit.agents import stt
+from livekit.agents import function_tool, stt
 from livekit.agents.types import TimedString
 from livekit.agents.voice import Agent
 from livekit.agents.voice.agent import ModelSettings
@@ -86,6 +87,59 @@ class VoiceAgent(Agent):
             if self._greeting_complete is not None:
                 self._greeting_complete[0] = True
 
+    @function_tool()
+    async def save_lead_info(
+        self,
+        name: str | None = None,
+        company: str | None = None,
+        whatsapp_number: str | None = None,
+        city: str | None = None,
+        need: str | None = None,
+        has_existing_website: bool | None = None,
+        website_action: str | None = None,
+        business_description: str | None = None,
+        start_timeline: str | None = None,
+        lead_intent: str | None = None,
+        appointment_time: str | None = None,
+    ) -> str:
+        """Save or update structured lead details as they are gathered during the call.
+
+        Call this whenever the caller provides new information — you do not need
+        to have every field before calling; call it again later with additional
+        fields as the conversation progresses. Only pass fields you actually have.
+        """
+        await self._save_lead_fields(
+            name=name,
+            company=company,
+            whatsapp_number=whatsapp_number,
+            city=city,
+            need=need,
+            has_existing_website=has_existing_website,
+            website_action=website_action,
+            business_description=business_description,
+            start_timeline=start_timeline,
+            lead_intent=lead_intent,
+            appointment_time=appointment_time,
+        )
+        return "Lead info saved."
+
+    @sync_to_async
+    def _save_lead_fields(self, **fields) -> None:
+        from apps.calls.models import CallSession, Lead
+
+        session = CallSession.objects.filter(room_name=self._room).first()
+        if session is None:
+            logger.warning("save_lead_info: no CallSession for room=%s", self._room)
+            return
+        lead, _ = Lead.objects.get_or_create(session=session)
+        changed = []
+        for field, value in fields.items():
+            if value is not None and value != "":
+                setattr(lead, field, value)
+                changed.append(field)
+        if changed:
+            lead.save(update_fields=[*changed, "updated_at"])
+
     def stt_node(
         self, audio: AsyncIterable[rtc.AudioFrame], model_settings: ModelSettings
     ):
@@ -154,5 +208,4 @@ class VoiceAgent(Agent):
                     await self._publisher.llm_response("".join(parts), is_final=False)
             yield delta
 
-        # Do not send is_final here — transcription ends before TTS playout finishes.
-        # Final text is published after playback (conversation_item_added / llm_playback_end).
+            

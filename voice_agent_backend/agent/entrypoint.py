@@ -1096,6 +1096,11 @@ async def entrypoint(ctx: JobContext):
                     response_length=len(text),
                 )
                 await publisher.llm_response(text, is_final=True)
+                await log_call_event(
+                    room_name,
+                    "agent_response",
+                    {"text": text[:500]},
+                )
 
         asyncio.create_task(_handle())
 
@@ -1202,8 +1207,13 @@ def _startup_provider_checks():
         worker_env,
     )
 
+    from agent.pipeline.tts_factory import get_tts_provider
+
     livekit_url = _env("LIVEKIT_URL")
-    tts_result = check_supertonic_on_startup()
+    if get_tts_provider() == "cartesia":
+        tts_result = {"ok": True, "skipped": True, "reason": "using cartesia, no local TTS server"}
+    else:
+        tts_result = check_supertonic_on_startup()
     health_ok = tts_result.get("health", {}).get("ok")
     log_block(
         logger,
