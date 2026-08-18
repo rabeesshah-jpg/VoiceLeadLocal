@@ -356,6 +356,29 @@ async def entrypoint(ctx: JobContext):
             instructions = get_voice_agent_instructions(language)
             logger.warning("Session prompt lookup skipped: %s", exc)
 
+    # No matching CallSession found in DB (e.g. this job came from a SIP/phone
+    # call rather than the browser widget, which is the only flow that creates
+    # a CallSession up front via /api/calls/start/). Auto-create one now so
+    # that every log_call_event(...) call below actually persists instead of
+    # silently no-op'ing (session_events._persist_call_event returns early
+    # when it can't find a matching CallSession for room_name).
+    if db_session is None:
+        try:
+            db_session = await _create_session_async(
+                room_name, language=language, system_prompt=instructions
+            )
+            log_block(
+                logger,
+                logging.INFO,
+                operation="DATABASE",
+                step="call_session_auto_created",
+                status="OK",
+                room=room_name,
+                reason="no_existing_session_found_likely_sip_call",
+            )
+        except Exception as exc:
+            logger.warning("Could not auto-create CallSession for %s: %s", room_name, exc)
+
     user_stt_lang_holder[0] = default_user_stt_language(language)
     greeting_text = get_call_greeting(language)
 
@@ -483,6 +506,14 @@ async def entrypoint(ctx: JobContext):
         room=room_name,
         participant_identity=participant.identity,
     )
+
+    # Now that the caller has actually joined, record their real identity
+    # (e.g. "sip_+19106599230" for phone calls) on the CallSession. This
+    # covers both the auto-created SIP session above and the browser flow,
+    # which creates the session before the identity is known.
+    if db_session:
+        await _update_session_identity_async(room_name, participant.identity)
+
     stt_sample_rate = int(_env("VOICE_AGENT_STT_SAMPLE_RATE", "16000") or "16000")
     room_options = room_io.RoomOptions(
         participant_identity=participant.identity,
@@ -1042,7 +1073,7 @@ async def entrypoint(ctx: JobContext):
                     status="OK",
                     room=room_name,
                     turn_id=pipeline_turn_id,
-                    **{k: v for k, v in payload.items() if v is not None},
+                    **{k: v for k, v in payload.items() if v is not None and k != "turn_id"},
                 )
                 await publisher.latency(payload)
                 await log_call_event(room_name, "latency", payload)
@@ -1164,6 +1195,7 @@ async def entrypoint(ctx: JobContext):
         with StepTimer(logger, operation, "agent_session_active", room=room_name, job_id=job_id):
             await _wait_until_room_disconnected(room)
         await log_call_event(room_name, "worker_session_ended", {})
+        await _mark_session_ended_async(room_name, reason="room_disconnected")
         log_block(
             logger,
             logging.INFO,
@@ -1176,6 +1208,7 @@ async def entrypoint(ctx: JobContext):
     except Exception as exc:
         logger.exception("Agent session failed")
         await log_call_event(room_name, "worker_failed", {"error": str(exc)[:300]})
+        await _mark_session_ended_async(room_name, reason=f"worker_failed: {str(exc)[:200]}")
         await publisher.error("worker_failed", str(exc))
         raise
 
@@ -1191,6 +1224,66 @@ async def _get_session_async(room_name: str):
             .first(),
             thread_sensitive=True,
         )()
+
+
+async def _create_session_async(room_name: str, *, language: str, system_prompt: str = ""):
+    """Create a CallSession for a room that has none yet.
+
+    This covers SIP/phone calls: LiveKit's SIP dispatch rule creates the room
+    and dispatches this worker directly, bypassing the Django
+    /api/calls/start/ endpoint that normally creates the CallSession up front
+    for browser calls. Without a matching CallSession row, every
+    log_call_event(...) call in this file silently no-ops (see
+    agent/pipeline/session_events.py: _persist_call_event returns early when
+    it can't find a session for room_name) — so nothing about the call gets
+    stored or shown in the admin dashboard.
+    """
+    from asgiref.sync import sync_to_async
+    from apps.calls.models import CallSession
+
+    def _create():
+        session, _created = CallSession.objects.get_or_create(
+            room_name=room_name,
+            defaults={
+                "user_identity": "sip-caller",
+                "status": CallSession.STATUS_ACTIVE,
+                "language": language,
+                "system_prompt": system_prompt,
+            },
+        )
+        return session
+
+    with StepTimer(logger, "DATABASE", "create_call_session", room=room_name):
+        return await sync_to_async(_create, thread_sensitive=True)()
+
+
+async def _update_session_identity_async(room_name: str, identity: str) -> None:
+    """Record the caller's real participant identity once they've joined
+    (e.g. "sip_+19106599230" for phone calls) and ensure status is active.
+    """
+    from asgiref.sync import sync_to_async
+    from apps.calls.models import CallSession
+
+    def _update():
+        CallSession.objects.filter(room_name=room_name).update(
+            user_identity=identity, status=CallSession.STATUS_ACTIVE
+        )
+
+    with StepTimer(logger, "DATABASE", "update_call_session_identity", room=room_name):
+        await sync_to_async(_update, thread_sensitive=True)()
+
+
+async def _mark_session_ended_async(room_name: str, *, reason: str) -> None:
+    from asgiref.sync import sync_to_async
+    from apps.calls.models import CallSession
+
+    def _mark():
+        session = CallSession.objects.filter(room_name=room_name).first()
+        if session:
+            session.mark_ended(reason)
+
+    with StepTimer(logger, "DATABASE", "mark_call_session_ended", room=room_name):
+        await sync_to_async(_mark, thread_sensitive=True)()
 
 
 def _startup_provider_checks():

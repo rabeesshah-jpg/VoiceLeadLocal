@@ -1,0 +1,15 @@
+{
+  "dispatch_rule": {
+    "rule": {
+      "dispatchRuleIndividual": {
+        "roomPrefix": "call-"
+      }
+    },
+    "trunk_ids": ["ST_AXtc4DZCB9e5"],
+    "room_config": {
+      "agents": [
+        { "agent_name": "voice-agent" }
+      ]
+    }
+  }
+}
