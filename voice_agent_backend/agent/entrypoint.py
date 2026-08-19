@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -137,6 +138,23 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _extract_caller_number(identity: str) -> str | None:
+    """Extract the E.164 phone number from a SIP participant identity like
+    'sip_+923121363468'. Returns None for non-SIP identities (e.g. web
+    callers, whose identity looks like 'user-<uuid>' and has no phone
+    number to offer).
+    """
+    if not identity:
+        return None
+    match = re.match(r"^sip_(\+?\d{6,15})$", identity)
+    if not match:
+        return None
+    number = match.group(1)
+    if not number.startswith("+"):
+        number = f"+{number}"
+    return number
 
 
 def _resolve_language(ctx: JobContext, db_session) -> str:
@@ -295,6 +313,10 @@ async def entrypoint(ctx: JobContext):
     stt_segment_parts: list[str] = []
     user_stt_lang_holder: list[str] = ["en-US"]
     greeting_complete: list[bool] = [False]
+    call_should_end: list[bool] = [False]
+    silence_watchdog_task: list[asyncio.Task | None] = [None]
+    SILENCE_WARNING_S = _env_float("VOICE_AGENT_SILENCE_WARNING_S", 20.0)
+    SILENCE_DISCONNECT_S = _env_float("VOICE_AGENT_SILENCE_DISCONNECT_S", 15.0)
     greeting_text = ""
 
     def _on_tts_timing(timing: TtsCallTiming) -> None:
@@ -514,6 +536,28 @@ async def entrypoint(ctx: JobContext):
     if db_session:
         await _update_session_identity_async(room_name, participant.identity)
 
+    caller_number = _extract_caller_number(participant.identity)
+    if caller_number:
+        instructions = (
+            instructions
+            + "\n\n## Caller's phone number\n"
+            + f'This caller is calling from {caller_number}. If they say to use '
+            + 'this number, their calling number, or "the number I\'m calling '
+            + f'from" for WhatsApp, call save_lead_info with whatsapp_number set '
+            + f'to exactly "{caller_number}" — do not ask them to read out digits '
+            + "in that case."
+        )
+        log_block(
+            logger,
+            logging.INFO,
+            operation=operation,
+            step="caller_number_injected",
+            status="OK",
+            room=room_name,
+            caller_number=caller_number,
+        )
+        await _prefill_lead_phone_async(room_name, caller_number)
+
     stt_sample_rate = int(_env("VOICE_AGENT_STT_SAMPLE_RATE", "16000") or "16000")
     room_options = room_io.RoomOptions(
         participant_identity=participant.identity,
@@ -537,9 +581,66 @@ async def entrypoint(ctx: JobContext):
         if not pipeline_holder[0].turn_id:
             _open_user_turn(user_turn_seq[0])
 
+    def _cancel_silence_watchdog() -> None:
+        task = silence_watchdog_task[0]
+        if task is not None and not task.done():
+            task.cancel()
+        silence_watchdog_task[0] = None
+
+    async def _silence_watchdog() -> None:
+        """If the caller goes quiet, check in once, then hang up if they
+        still don't respond. Deliberately hardcoded (not LLM-driven) so this
+        safety net works every time, independent of tool-calling reliability.
+        """
+        try:
+            await asyncio.sleep(SILENCE_WARNING_S)
+            log_block(
+                logger,
+                logging.INFO,
+                operation="VOICE_JOB",
+                step="silence_check_in",
+                status="TRIGGERED",
+                room=room_name,
+            )
+            check_in_text = (
+                "هل ما زلت معي؟"
+                if normalize_language(language) == "ar"
+                else "Are you still there?"
+            )
+            handle = agent_session.say(
+                check_in_text, allow_interruptions=True, add_to_chat_ctx=True
+            )
+            await handle.wait_for_playout()
+
+            await asyncio.sleep(SILENCE_DISCONNECT_S)
+            log_block(
+                logger,
+                logging.INFO,
+                operation="VOICE_JOB",
+                step="silence_auto_disconnect",
+                status="TRIGGERED",
+                room=room_name,
+            )
+            farewell_text = (
+                "يبدو أنك مشغول الآن، سأنهي المكالمة. لا تتردد بالاتصال مرة أخرى. مع السلامة!"
+                if normalize_language(language) == "ar"
+                else "I haven't heard from you, so I'll let you go for now. "
+                "Feel free to call back anytime. Goodbye!"
+            )
+            handle = agent_session.say(
+                farewell_text, allow_interruptions=True, add_to_chat_ctx=True
+            )
+            await handle.wait_for_playout()
+            await _end_call_async(room_name)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("silence_watchdog failed room=%s", room_name)
+
     def _on_vad_speech_start() -> None:
         if not greeting_complete[0]:
             return
+        _cancel_silence_watchdog()
         vad_speech_active[0] = True
         _ensure_user_utterance_open(from_vad=True)
 
@@ -556,6 +657,15 @@ async def entrypoint(ctx: JobContext):
             pipeline.emit_stt_latency_summary()
         user_utterance_open[0] = False
 
+    def _on_end_call() -> None:
+        _cancel_silence_watchdog()
+        call_should_end[0] = True
+        log_pipeline_event(
+            "END_CALL_REQUESTED",
+            room=room_name,
+            turn_id=pipeline_holder[0].turn_id,
+        )
+
     agent = VoiceAgent(
         instructions=instructions,
         language=language,
@@ -565,6 +675,7 @@ async def entrypoint(ctx: JobContext):
         on_llm_first_token=_on_llm_first_token,
         on_vad_speech_start=_on_vad_speech_start,
         on_vad_speech_end=_on_vad_speech_end,
+        on_end_call=_on_end_call,
         greeting_complete=greeting_complete,
         room=room_name,
     )
@@ -1079,6 +1190,30 @@ async def entrypoint(ctx: JobContext):
                 await log_call_event(room_name, "latency", payload)
                 latency_holder[0] = TurnLatency()
                 pipeline.reset_turn(room=room_name)
+
+                # Restart the silence watchdog after a genuine real-user turn.
+                # pipeline_turn_id is only set for turns opened by real STT
+                # input — the watchdog's own "Are you still there?" / farewell
+                # lines never open a pipeline turn, so this naturally skips
+                # restarting after the watchdog's own utterances.
+                if pipeline_turn_id and not call_should_end[0]:
+                    _cancel_silence_watchdog()
+                    silence_watchdog_task[0] = asyncio.create_task(_silence_watchdog())
+
+                # Goodbye audio has now fully finished playing. If the LLM
+                # called end_call() during this turn, disconnect the SIP
+                # call now instead of waiting for the caller to hang up.
+                if call_should_end[0]:
+                    log_block(
+                        logger,
+                        logging.INFO,
+                        operation="VOICE_JOB",
+                        step="call_auto_disconnect",
+                        status="TRIGGERED",
+                        room=room_name,
+                        turn_id=pipeline_turn_id,
+                    )
+                    asyncio.create_task(_end_call_async(room_name))
             if state == "listening" and not greeting_complete[0]:
                 return
 
@@ -1192,8 +1327,19 @@ async def entrypoint(ctx: JobContext):
             if not greeting_complete[0]:
                 await publisher.agent_state("listening")
                 greeting_complete[0] = True
+            # Start the silence watchdog now that the greeting has finished
+            # and we're genuinely waiting on the caller for the first time.
+            _cancel_silence_watchdog()
+            silence_watchdog_task[0] = asyncio.create_task(_silence_watchdog())
         with StepTimer(logger, operation, "agent_session_active", room=room_name, job_id=job_id):
             await _wait_until_room_disconnected(room)
+        # Room has ended (caller hung up / disconnected, or the auto-disconnect
+        # above ended it). Send the WhatsApp/SMS lead summary now, before
+        # marking the session ended, so it still has access to the Lead row
+        # for this room. Never allowed to raise — a delivery failure here
+        # must not block session teardown.
+        _cancel_silence_watchdog()
+        await _send_lead_summary_async(room_name)
         await log_call_event(room_name, "worker_session_ended", {})
         await _mark_session_ended_async(room_name, reason="room_disconnected")
         log_block(
@@ -1271,6 +1417,108 @@ async def _update_session_identity_async(room_name: str, identity: str) -> None:
 
     with StepTimer(logger, "DATABASE", "update_call_session_identity", room=room_name):
         await sync_to_async(_update, thread_sensitive=True)()
+
+
+async def _prefill_lead_phone_async(room_name: str, phone_number: str) -> None:
+    """Pre-populate the Lead's phone number from the caller's real SIP
+    identity as soon as they join, so the SMS summary always goes to the
+    number they're actually calling from — without depending on the LLM to
+    ask for it or transcribe it correctly.
+
+    save_lead_info's whatsapp_number parameter can still override this
+    later (e.g. if the caller explicitly gives a different number), since
+    _save_lead_fields only updates fields it receives a non-empty value
+    for — it won't clobber this prefilled value with nothing.
+    """
+    from asgiref.sync import sync_to_async
+    from apps.calls.models import CallSession, Lead
+
+    def _prefill():
+        session = CallSession.objects.filter(room_name=room_name).first()
+        if session is None:
+            return
+        lead, _ = Lead.objects.get_or_create(session=session)
+        if not lead.whatsapp_number:
+            lead.whatsapp_number = phone_number
+            lead.save(update_fields=["whatsapp_number", "updated_at"])
+
+    with StepTimer(logger, "DATABASE", "prefill_lead_phone", room=room_name):
+        await sync_to_async(_prefill, thread_sensitive=True)()
+
+
+async def _send_lead_summary_async(room_name: str) -> None:
+    """Send the post-call SMS/WhatsApp lead summary + Calendly link.
+
+    Looks up the Lead row saved during the call (via save_lead_info) using
+    the room name, and sends it to the caller's whatsapp_number field.
+    Deliberately never raises — a delivery failure here must never block
+    marking the CallSession as ended or crash the worker's shutdown path.
+    """
+    from asgiref.sync import sync_to_async
+    from apps.calls.models import CallSession, Lead
+    from agent.pipeline.lead_summary import send_lead_summary
+
+    def _get_lead():
+        session = CallSession.objects.filter(room_name=room_name).first()
+        if session is None:
+            return None
+        return Lead.objects.filter(session=session).first()
+
+    with StepTimer(logger, "LEAD_SUMMARY", "send_lead_summary", room=room_name):
+        try:
+            lead = await sync_to_async(_get_lead, thread_sensitive=True)()
+            if lead is None:
+                logger.info(
+                    "send_lead_summary: no Lead found for room=%s, skipping", room_name
+                )
+                return
+            if not lead.whatsapp_number:
+                logger.warning(
+                    "send_lead_summary: Lead has no whatsapp_number, room=%s, lead_id=%s",
+                    room_name, lead.pk,
+                )
+                return
+            # channel="sms" for now — switch to "whatsapp" once a WhatsApp
+            # business-initiated message template is approved in Twilio.
+            await send_lead_summary(lead.whatsapp_number, lead, channel="sms")
+        except Exception:
+            logger.exception("send_lead_summary FAILED room=%s", room_name)
+
+
+async def _end_call_async(room_name: str) -> None:
+    """Force-disconnect every participant in the room, ending the SIP call.
+
+    Called once the agent's goodbye audio has fully finished playing (see
+    the natural_turn_end handling in on_agent_state above). Requires
+    LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET to be set — these are
+    the same credentials the worker already uses to connect to LiveKit, so
+    they should already be present in the environment.
+
+    NOTE: verify these three env var names match what's actually set in
+    your .env / worker_env.py — if your project uses different names for
+    the API key/secret, update the _env(...) calls below accordingly.
+    """
+    livekit_url = _env("LIVEKIT_URL")
+    api_key = _env("LIVEKIT_API_KEY")
+    api_secret = _env("LIVEKIT_API_SECRET")
+    if not (livekit_url and api_key and api_secret):
+        logger.warning(
+            "call_auto_disconnect: missing LiveKit API credentials "
+            "(LIVEKIT_URL/LIVEKIT_API_KEY/LIVEKIT_API_SECRET), cannot end room=%s",
+            room_name,
+        )
+        return
+
+    from livekit import api as lk_api
+
+    lk = lk_api.LiveKitAPI(livekit_url, api_key, api_secret)
+    try:
+        await lk.room.delete_room(lk_api.DeleteRoomRequest(room=room_name))
+        logger.info("call_auto_disconnect: room deleted room=%s", room_name)
+    except Exception:
+        logger.exception("call_auto_disconnect FAILED room=%s", room_name)
+    finally:
+        await lk.aclose()
 
 
 async def _mark_session_ended_async(room_name: str, *, reason: str) -> None:

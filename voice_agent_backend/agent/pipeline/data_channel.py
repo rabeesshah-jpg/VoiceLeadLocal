@@ -17,10 +17,10 @@ class DataChannelPublisher:
     def __init__(self, room: "rtc.Room"):
         self._room = room
 
-    async def publish(self, payload: dict):
+    async def publish(self, payload: dict, *, reliable: bool = True):
         try:
             data = json.dumps(payload).encode("utf-8")
-            await self._room.local_participant.publish_data(data, reliable=True)
+            await self._room.local_participant.publish_data(data, reliable=reliable)
         except Exception as exc:
             logger.warning("Failed to publish data message: %s", exc)
 
@@ -45,19 +45,30 @@ class DataChannelPublisher:
             payload["message_id"] = message_id
         if turn_seq:
             payload["turn_seq"] = turn_seq
-        await self.publish(payload)
+        # Interim (non-final) transcripts fire many times per second while the
+        # caller is talking — each one supersedes the last, so losing one is
+        # harmless. Reliable delivery's per-message ack round-trip isn't worth
+        # paying at that frequency; only the final transcript needs it.
+        await self.publish(payload, reliable=is_final)
 
     async def agent_text(self, text: str, is_final: bool = False):
         await self.publish({"type": "agent_text", "text": text, "is_final": is_final})
 
     async def llm_response(self, text: str, *, is_final: bool = False):
+        # Same reasoning as user_transcript: streamed partial LLM text fires
+        # on every token. Awaiting a reliable (acked) publish for each one
+        # was serializing the entire generation loop behind network
+        # round-trips — this is the primary fix for the ~300ms/token
+        # slowdown seen in pipeline latency logs. Only the final chunk needs
+        # guaranteed delivery.
         await self.publish(
             {
                 "type": "llm_response",
                 "text": text,
                 "is_final": is_final,
                 "ts": time.time(),
-            }
+            },
+            reliable=is_final,
         )
 
     async def llm_playback_end(self, *, interrupted: bool = False):

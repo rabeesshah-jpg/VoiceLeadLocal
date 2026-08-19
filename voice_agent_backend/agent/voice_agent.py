@@ -17,6 +17,7 @@ from agent.greeting import get_call_greeting
 from agent.observability.pipeline_events import log_pipeline_event
 from agent.observability.pipeline_latency import TurnPipelineTracker
 from agent.pipeline.data_channel import DataChannelPublisher
+from agent.pipeline.guardrails import is_guardrail_trigger, refusal_text
 from agent.pipeline.partial_stt_preemptive import (
     PartialSttPreemptivePolicy,
     preflight_from_interim,
@@ -28,6 +29,35 @@ logger = logging.getLogger("agent.voice_agent")
 
 def _text_chunk(delta: str | TimedString) -> str:
     return str(delta)
+
+
+def _extract_last_user_text(chat_ctx) -> str:
+    """Best-effort extraction of the caller's most recent message text from
+    a LiveKit ChatContext, for the guardrail pattern check in llm_node
+    below. Defensive against minor API-shape differences across SDK
+    versions — returns "" (never raises) if the expected attributes aren't
+    present, so guardrail layer 2 just falls through to a normal LLM call
+    rather than breaking the turn.
+    """
+    items = None
+    for attr in ("items", "messages"):
+        items = getattr(chat_ctx, attr, None)
+        if items:
+            break
+    if not items:
+        return ""
+    for item in reversed(list(items)):
+        role = getattr(item, "role", None)
+        if role == "user":
+            text = getattr(item, "text_content", None)
+            if text is None:
+                content = getattr(item, "content", None)
+                if isinstance(content, list):
+                    text = " ".join(str(c) for c in content if isinstance(c, str))
+                elif isinstance(content, str):
+                    text = content
+            return (text or "").strip()
+    return ""
 
 
 class VoiceAgent(Agent):
@@ -42,6 +72,7 @@ class VoiceAgent(Agent):
         on_llm_first_token: Callable[[], None] | None = None,
         on_vad_speech_start: Callable[[], None] | None = None,
         on_vad_speech_end: Callable[[], None] | None = None,
+        on_end_call: Callable[[], None] | None = None,
         greeting_complete: list[bool] | None = None,
         room: str = "",
         **kwargs,
@@ -53,6 +84,7 @@ class VoiceAgent(Agent):
         self._on_llm_first_token = on_llm_first_token
         self._on_vad_speech_start = on_vad_speech_start
         self._on_vad_speech_end = on_vad_speech_end
+        self._on_end_call = on_end_call
         self._greeting_complete = greeting_complete
         self._room = room
         policy = PartialSttPreemptivePolicy.from_env()
@@ -108,19 +140,27 @@ class VoiceAgent(Agent):
         to have every field before calling; call it again later with additional
         fields as the conversation progresses. Only pass fields you actually have.
         """
-        await self._save_lead_fields(
-            name=name,
-            company=company,
-            whatsapp_number=whatsapp_number,
-            city=city,
-            need=need,
-            has_existing_website=has_existing_website,
-            website_action=website_action,
-            business_description=business_description,
-            start_timeline=start_timeline,
-            lead_intent=lead_intent,
-            appointment_time=appointment_time,
+        logger.info(
+            "save_lead_info CALLED room=%s name=%s company=%s city=%s",
+            self._room, name, company, city,
         )
+        try:
+            await self._save_lead_fields(
+                name=name,
+                company=company,
+                whatsapp_number=whatsapp_number,
+                city=city,
+                need=need,
+                has_existing_website=has_existing_website,
+                website_action=website_action,
+                business_description=business_description,
+                start_timeline=start_timeline,
+                lead_intent=lead_intent,
+                appointment_time=appointment_time,
+            )
+        except Exception:
+            logger.exception("save_lead_info FAILED room=%s", self._room)
+            raise
         return "Lead info saved."
 
     @sync_to_async
@@ -139,6 +179,55 @@ class VoiceAgent(Agent):
                 changed.append(field)
         if changed:
             lead.save(update_fields=[*changed, "updated_at"])
+            logger.info(
+                "save_lead_info: saved fields=%s room=%s lead_id=%s",
+                changed, self._room, lead.pk,
+            )
+        else:
+            logger.info("save_lead_info: called with no changed fields, room=%s", self._room)
+
+    @function_tool()
+    async def end_call(self) -> str:
+        """Call this exactly once, immediately after you have finished speaking
+        your closing line (e.g. after telling the caller you'll send the
+        summary and Calendly link, and saying goodbye).
+
+        Do NOT call this before your goodbye message — call it right after,
+        as your very last action in the conversation. The call will
+        disconnect automatically once your goodbye has finished playing; you
+        do not need to say anything further after calling this tool.
+        """
+        logger.info("end_call CALLED room=%s", self._room)
+        if self._on_end_call:
+            self._on_end_call()
+        return "Call will end automatically once this message finishes playing."
+
+    def llm_node(self, chat_ctx, tools, model_settings: ModelSettings):
+        return self._llm_node_with_guardrails(chat_ctx, tools, model_settings)
+
+    async def _llm_node_with_guardrails(self, chat_ctx, tools, model_settings: ModelSettings):
+        """Guardrail layer 2: if the caller's latest message matches a known
+        jailbreak/injection pattern, skip the real LLM call entirely and
+        yield a fixed refusal instead — cheaper and faster than a normal
+        turn, and independent of whether the model would have complied.
+        Falls through to the normal LLM node for everything else, and on
+        any extraction issue, so this never breaks a call.
+        """
+        try:
+            last_user_text = _extract_last_user_text(chat_ctx)
+        except Exception:
+            last_user_text = ""
+
+        if last_user_text and is_guardrail_trigger(last_user_text):
+            logger.info(
+                "guardrail_layer2_triggered room=%s text=%r",
+                self._room, last_user_text[:160],
+            )
+            yield refusal_text(self._language)
+            return
+
+        async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
+            yield chunk
 
     def stt_node(
         self, audio: AsyncIterable[rtc.AudioFrame], model_settings: ModelSettings
@@ -195,6 +284,8 @@ class VoiceAgent(Agent):
     async def _transcription_node_stream(
         self, text: AsyncIterable[str | TimedString], model_settings: ModelSettings
     ):
+        import asyncio
+
         parts: list[str] = []
         async for delta in Agent.default.transcription_node(self, text, model_settings):
             chunk = _text_chunk(delta)
@@ -205,7 +296,14 @@ class VoiceAgent(Agent):
                 if self._on_llm_first_token:
                     self._on_llm_first_token()
                 if self._publisher:
-                    await self._publisher.llm_response("".join(parts), is_final=False)
+                    # Fire-and-forget: awaiting this inline was blocking the
+                    # LLM's token generation loop on a network round-trip for
+                    # every single token (previously reliable=True on every
+                    # call), which was the primary cause of abnormally slow
+                    # per-token generation seen in pipeline latency logs
+                    # (~300ms/token). The UI only needs the latest partial
+                    # text eventually, not a guaranteed-ordered ack per token.
+                    asyncio.create_task(
+                        self._publisher.llm_response("".join(parts), is_final=False)
+                    )
             yield delta
-
-            
