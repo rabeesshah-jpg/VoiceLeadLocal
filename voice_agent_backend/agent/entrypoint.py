@@ -98,6 +98,33 @@ FALLBACK_APOLOGY_EN = (
 )
 FALLBACK_APOLOGY_AR = "عذراً، في مشكلة بسيطة. ممكن تعيد كلامك؟"
 
+# Deterministic backstop for ending calls: rather than relying solely on the
+# LLM reliably calling the end_call tool (which has proven unreliable in
+# testing), also check the assistant's own generated text for a closing
+# phrase. If Nora's own words sound like a genuine goodbye, the call ends
+# after that message finishes playing — independent of whether end_call was
+# also invoked. This mirrors the guardrails.py approach: critical behavior
+# should not depend purely on the model choosing to comply.
+import re as _re
+
+_GOODBYE_PATTERNS: tuple[_re.Pattern, ...] = tuple(
+    _re.compile(p, _re.IGNORECASE)
+    for p in (
+        r"\bgoodbye\b",
+        r"\bgood bye\b",
+        r"\btake care\b",
+        r"\bhave a (great|good|nice|wonderful) day\b",
+        r"\bمع السلامة\b",
+        r"\bيوم سعيد\b",
+    )
+)
+
+
+def _looks_like_goodbye(text: str) -> bool:
+    if not text:
+        return False
+    return any(p.search(text) for p in _GOODBYE_PATTERNS)
+
 
 async def _wait_until_room_disconnected(room: rtc.Room) -> None:
     if room.connection_state == rtc.ConnectionState.CONN_DISCONNECTED:
@@ -317,6 +344,7 @@ async def entrypoint(ctx: JobContext):
     silence_watchdog_task: list[asyncio.Task | None] = [None]
     SILENCE_WARNING_S = _env_float("VOICE_AGENT_SILENCE_WARNING_S", 20.0)
     SILENCE_DISCONNECT_S = _env_float("VOICE_AGENT_SILENCE_DISCONNECT_S", 15.0)
+    transcript_lines: list[str] = []
     greeting_text = ""
 
     def _on_tts_timing(timing: TtsCallTiming) -> None:
@@ -557,6 +585,41 @@ async def entrypoint(ctx: JobContext):
             caller_number=caller_number,
         )
         await _prefill_lead_phone_async(room_name, caller_number)
+    else:
+        # No phone number available for this participant (e.g. a web/browser
+        # call — there's no SIP identity to extract a number from). Ask for
+        # it once so the post-call summary can still be sent. This ONLY
+        # applies when caller_number couldn't be determined — real phone
+        # calls always take the branch above and are unaffected by this.
+        instructions = (
+            instructions
+            + "\n\n## Caller's phone number\n"
+            + "You were not given this caller's phone number automatically. "
+            + "After you have their name and company, ask once for the best "
+            + 'number to text a summary and meeting link to — for example, '
+            + '"And what\'s the best number to text that meeting link to?" '
+            + "Repeat the digits back in a normal spoken format, then call "
+            + "save_lead_info with whatsapp_number set to a clean international "
+            + "number including the country code (assume Pakistan +92 unless "
+            + "they say otherwise).\n"
+            + "If the caller says something like \"this is my number\" or "
+            + '"I\'m calling from it right now" — this does NOT apply here. '
+            + "This is a browser call, not a phone call, so there is no real "
+            + "number behind it. Say you're not able to see a number for this "
+            + "type of call and ask them to say their actual digits instead. "
+            + "Never save a partial number, a country code alone, or anything "
+            + "guessed — only call save_lead_info with whatsapp_number once "
+            + "they've given you real, complete digits."
+        )
+        log_block(
+            logger,
+            logging.INFO,
+            operation=operation,
+            step="caller_number_not_available",
+            status="OK",
+            room=room_name,
+            participant_identity=participant.identity,
+        )
 
     stt_sample_rate = int(_env("VOICE_AGENT_STT_SAMPLE_RATE", "16000") or "16000")
     room_options = room_io.RoomOptions(
@@ -635,7 +698,11 @@ async def entrypoint(ctx: JobContext):
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("silence_watchdog failed room=%s", room_name)
+            import traceback
+            logger.error(
+                "silence_watchdog failed room=%s\n%s",
+                room_name, traceback.format_exc(),
+            )
 
     def _on_vad_speech_start() -> None:
         if not greeting_complete[0]:
@@ -842,6 +909,8 @@ async def entrypoint(ctx: JobContext):
                 message_id=str(uuid.uuid4()),
                 turn_seq=turn_seq,
             )
+        if ui_text.strip():
+            transcript_lines.append(f"USER: {ui_text.strip()}")
 
         stt_snapshot = pipeline.build_stt_metrics()
         log_pipeline_event(
@@ -1261,6 +1330,18 @@ async def entrypoint(ctx: JobContext):
                     text=text[:200],
                     response_length=len(text),
                 )
+                if not call_should_end[0] and _looks_like_goodbye(text):
+                    call_should_end[0] = True
+                    log_block(
+                        logger,
+                        logging.INFO,
+                        operation="VOICE_JOB",
+                        step="goodbye_phrase_detected",
+                        status="OK",
+                        room=room_name,
+                        text_preview=text[:120],
+                    )
+                transcript_lines.append(f"NORA: {text}")
                 await publisher.llm_response(text, is_final=True)
                 await log_call_event(
                     room_name,
@@ -1339,6 +1420,7 @@ async def entrypoint(ctx: JobContext):
         # for this room. Never allowed to raise — a delivery failure here
         # must not block session teardown.
         _cancel_silence_watchdog()
+        await _extract_and_fill_lead_async(room_name, transcript_lines)
         await _send_lead_summary_async(room_name)
         await log_call_event(room_name, "worker_session_ended", {})
         await _mark_session_ended_async(room_name, reason="room_disconnected")
@@ -1446,13 +1528,74 @@ async def _prefill_lead_phone_async(room_name: str, phone_number: str) -> None:
         await sync_to_async(_prefill, thread_sensitive=True)()
 
 
-async def _send_lead_summary_async(room_name: str) -> None:
-    """Send the post-call SMS/WhatsApp lead summary + Calendly link.
+async def _extract_and_fill_lead_async(room_name: str, transcript_lines: list[str]) -> None:
+    """Post-call backstop for save_lead_info's live tool-calling reliability.
 
-    Looks up the Lead row saved during the call (via save_lead_info) using
-    the room name, and sends it to the caller's whatsapp_number field.
-    Deliberately never raises — a delivery failure here must never block
-    marking the CallSession as ended or crash the worker's shutdown path.
+    Runs the accumulated transcript through a single dedicated LLM
+    extraction call, then fills in any Lead fields that are still empty —
+    never overwrites anything save_lead_info already captured correctly
+    live. Deliberately never raises; a failure here must not block sending
+    the summary or marking the session ended.
+    """
+    if not transcript_lines:
+        return
+
+    from asgiref.sync import sync_to_async
+    from apps.calls.models import CallSession, Lead
+    from agent.pipeline.lead_extraction import extract_lead_fields, FIELDS
+
+    transcript = "\n".join(transcript_lines)
+
+    with StepTimer(logger, "LEAD_SUMMARY", "extract_and_fill_lead", room=room_name):
+        try:
+            extracted = await sync_to_async(extract_lead_fields, thread_sensitive=False)(
+                transcript
+            )
+            if not extracted:
+                logger.info(
+                    "extract_and_fill_lead: nothing extracted room=%s", room_name
+                )
+                return
+
+            def _fill():
+                session = CallSession.objects.filter(room_name=room_name).first()
+                if session is None:
+                    return []
+                lead, _ = Lead.objects.get_or_create(session=session)
+                changed = []
+                for field in FIELDS:
+                    if field not in extracted:
+                        continue
+                    current = getattr(lead, field, None)
+                    is_empty = current is None or current == ""
+                    if is_empty:
+                        setattr(lead, field, extracted[field])
+                        changed.append(field)
+                if changed:
+                    lead.save(update_fields=[*changed, "updated_at"])
+                return changed
+
+            changed = await sync_to_async(_fill, thread_sensitive=True)()
+            logger.info(
+                "extract_and_fill_lead: filled fields=%s room=%s",
+                changed, room_name,
+            )
+        except Exception:
+            logger.exception("extract_and_fill_lead FAILED room=%s", room_name)
+
+
+async def _send_lead_summary_async(room_name: str) -> None:
+    """Send the post-call lead summary + meeting link over both SMS and
+    WhatsApp (sandbox), independently — one channel failing does not block
+    the other. Temporary dual-send for client demo purposes; once WhatsApp
+    moves off the sandbox to a real approved sender, this can be simplified
+    back to a single channel if desired.
+
+    Looks up the Lead row saved during the call (via save_lead_info /
+    the caller-number prefill) using the room name, and sends it to the
+    caller's whatsapp_number field. Deliberately never raises — a delivery
+    failure here must never block marking the CallSession as ended or crash
+    the worker's shutdown path.
     """
     from asgiref.sync import sync_to_async
     from apps.calls.models import CallSession, Lead
@@ -1478,9 +1621,20 @@ async def _send_lead_summary_async(room_name: str) -> None:
                     room_name, lead.pk,
                 )
                 return
-            # channel="sms" for now — switch to "whatsapp" once a WhatsApp
-            # business-initiated message template is approved in Twilio.
-            await send_lead_summary(lead.whatsapp_number, lead, channel="sms")
+
+            try:
+                await send_lead_summary(lead.whatsapp_number, lead, channel="sms")
+            except Exception:
+                logger.exception(
+                    "send_lead_summary SMS FAILED room=%s lead_id=%s", room_name, lead.pk
+                )
+
+            try:
+                await send_lead_summary(lead.whatsapp_number, lead, channel="whatsapp")
+            except Exception:
+                logger.exception(
+                    "send_lead_summary WHATSAPP FAILED room=%s lead_id=%s", room_name, lead.pk
+                )
         except Exception:
             logger.exception("send_lead_summary FAILED room=%s", room_name)
 
