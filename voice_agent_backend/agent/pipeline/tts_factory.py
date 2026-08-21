@@ -25,7 +25,6 @@ def build_tts(
     on_llm_first_token: Callable[[], None] | None = None,
 ) -> lk_tts.TTS:
     provider = get_tts_provider()
-
     if provider == "supertonic":
         from agent.pipeline.tts_supertonic import build_supertonic_tts
 
@@ -35,9 +34,8 @@ def build_tts(
             pipeline_tracker=pipeline_tracker,
             on_llm_first_token=on_llm_first_token,
         )
-
     if provider == "cartesia":
-        from livekit.plugins import cartesia
+        from agent.pipeline.tts_cartesia_instrumented import InstrumentedCartesiaTTS
 
         # NOTE: config dict key is "lang" (see merge_tts_config_from_sources /
         # entrypoint.py's tts_config.get("lang")), not "language" — this was
@@ -47,7 +45,6 @@ def build_tts(
         language = (overrides or {}).get("lang") or os.environ.get(
             "CARTESIA_LANGUAGE", "en"
         )
-
         # Presets (VOICE_PRESETS) hold multilingual-server voice tags like
         # "male"/"female", not Cartesia voice IDs, so overrides are ignored
         # for voice selection on purpose — always use a real Cartesia voice
@@ -66,18 +63,22 @@ def build_tts(
                 or os.environ.get("CARTESIA_VOICE_ID")
                 or "<voice_id>"
             )
-
         # sonic-2's specific language list does not include Arabic;
         # Arabic support requires sonic-3 (or newer). Only use sonic-3 for
         # Arabic calls to avoid changing existing English call behavior.
         model = "sonic-3" if language == "ar" else "sonic-2"
-
-        return cartesia.TTS(
+        # InstrumentedCartesiaTTS is a drop-in subclass of the real
+        # cartesia.TTS — identical synthesis behavior, adds real
+        # tts_ttfb_ms/tts_total_ms timing (previously always None/missing,
+        # since the plain cartesia.TTS has no timing hooks at all).
+        return InstrumentedCartesiaTTS(
             model=model,
             voice=voice,
             language=language,
+            pipeline_tracker=pipeline_tracker,
+            on_timing=on_timing,
+            on_llm_first_token=on_llm_first_token,
         )
-
     from agent.pipeline.tts_multilingual_server import build_multilingual_tts
 
     return build_multilingual_tts(

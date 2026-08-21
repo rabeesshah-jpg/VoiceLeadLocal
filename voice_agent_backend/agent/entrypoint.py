@@ -747,6 +747,116 @@ async def entrypoint(ctx: JobContext):
         room=room_name,
     )
 
+    # Arabic-language DTMF menu (phone calls only — "press 2 for Arabic").
+    # Built upfront alongside the default English agent so the handoff via
+    # AgentSession.update_agent() is instant if the caller presses 2; no
+    # rebuild/reconnect needed. Uses the same Arabic TTS routing already
+    # wired in tts_factory.py (CARTESIA_VOICE_ID_AR / sonic-3).
+    arabic_tts = build_tts({"lang": "ar"})
+    arabic_instructions = get_voice_agent_instructions("ar")
+    arabic_agent = VoiceAgent(
+        instructions=arabic_instructions,
+        language="ar",
+        allow_interruptions=True,
+        publisher=publisher,
+        pipeline_tracker=pipeline_holder[0],
+        on_llm_first_token=_on_llm_first_token,
+        on_vad_speech_start=_on_vad_speech_start,
+        on_vad_speech_end=_on_vad_speech_end,
+        on_end_call=_on_end_call,
+        greeting_complete=greeting_complete,
+        room=room_name,
+        tts=arabic_tts,
+    )
+
+    language_selected: list[bool] = [False]
+    dtmf_window_open: list[bool] = [True]
+
+    async def _switch_to_arabic_async() -> None:
+        nonlocal language
+        try:
+            agent_session.update_agent(arabic_agent)
+            if hasattr(active_stt, "update_options"):
+                if is_deepgram_provider():
+                    active_stt.update_options(language="ar-SA")
+                else:
+                    active_stt.update_options(language="ar")
+            language = "ar"
+            await _update_session_language_async(room_name, "ar")
+            log_block(
+                logger,
+                logging.INFO,
+                operation="VOICE_JOB",
+                step="switched_to_arabic",
+                status="OK",
+                room=room_name,
+            )
+            await agent_session.say(
+                "تمام، راح أكمل معك بالعربي.",
+                allow_interruptions=True,
+                add_to_chat_ctx=True,
+            )
+        except Exception:
+            logger.exception("switch_to_arabic FAILED room=%s", room_name)
+
+    def _on_sip_dtmf_received(dtmf: rtc.SipDTMF) -> None:
+        if language_selected[0] or not dtmf_window_open[0]:
+            return
+        digit = dtmf.digit
+        log_block(
+            logger,
+            logging.INFO,
+            operation="VOICE_JOB",
+            step="dtmf_received",
+            status="OK",
+            room=room_name,
+            digit=digit,
+        )
+        if digit == "2":
+            language_selected[0] = True
+            asyncio.create_task(_switch_to_arabic_async())
+        elif digit == "1":
+            language_selected[0] = True
+            log_block(
+                logger,
+                logging.INFO,
+                operation="VOICE_JOB",
+                step="language_confirmed_english",
+                status="OK",
+                room=room_name,
+            )
+
+    room.on("sip_dtmf_received", _on_sip_dtmf_received)
+
+    async def _close_dtmf_window() -> None:
+        await asyncio.sleep(20.0)
+        dtmf_window_open[0] = False
+
+    asyncio.create_task(_close_dtmf_window())
+
+    # DEBUG ONLY: lets the update_agent()/Arabic TTS/STT handoff itself be
+    # tested via a free web browser call, with zero Twilio cost, since DTMF
+    # doesn't exist on browser calls. Set VOICE_AGENT_DEBUG_AUTO_ARABIC_SWITCH_S
+    # (seconds) to auto-trigger the exact same switch a "press 2" would —
+    # remove this env var (or leave it unset) for normal/production runs.
+    _debug_auto_switch_s = os.environ.get("VOICE_AGENT_DEBUG_AUTO_ARABIC_SWITCH_S")
+    if _debug_auto_switch_s:
+        async def _debug_auto_switch() -> None:
+            await asyncio.sleep(float(_debug_auto_switch_s))
+            if not language_selected[0]:
+                language_selected[0] = True
+                log_block(
+                    logger,
+                    logging.INFO,
+                    operation="VOICE_JOB",
+                    step="debug_auto_arabic_switch_triggered",
+                    status="OK",
+                    room=room_name,
+                )
+                await _switch_to_arabic_async()
+
+        asyncio.create_task(_debug_auto_switch())
+
     def _route_user_stt_language(display_text: str) -> None:
         if normalize_language(language) != "ar":
             return
@@ -1528,6 +1638,21 @@ async def _prefill_lead_phone_async(room_name: str, phone_number: str) -> None:
         await sync_to_async(_prefill, thread_sensitive=True)()
 
 
+async def _update_session_language_async(room_name: str, language: str) -> None:
+    """Record the language switch (e.g. after a DTMF Arabic selection) on
+    the CallSession, so the lead record and any downstream logic reflect
+    the language actually used for the bulk of the conversation.
+    """
+    from asgiref.sync import sync_to_async
+    from apps.calls.models import CallSession
+
+    def _update():
+        CallSession.objects.filter(room_name=room_name).update(language=language)
+
+    with StepTimer(logger, "DATABASE", "update_call_session_language", room=room_name):
+        await sync_to_async(_update, thread_sensitive=True)()
+
+
 async def _extract_and_fill_lead_async(room_name: str, transcript_lines: list[str]) -> None:
     """Post-call backstop for save_lead_info's live tool-calling reliability.
 
@@ -1601,15 +1726,18 @@ async def _send_lead_summary_async(room_name: str) -> None:
     from apps.calls.models import CallSession, Lead
     from agent.pipeline.lead_summary import send_lead_summary
 
-    def _get_lead():
+    def _get_lead_and_language():
         session = CallSession.objects.filter(room_name=room_name).first()
         if session is None:
-            return None
-        return Lead.objects.filter(session=session).first()
+            return None, "en"
+        lead = Lead.objects.filter(session=session).first()
+        return lead, (session.language or "en")
 
     with StepTimer(logger, "LEAD_SUMMARY", "send_lead_summary", room=room_name):
         try:
-            lead = await sync_to_async(_get_lead, thread_sensitive=True)()
+            lead, call_language = await sync_to_async(
+                _get_lead_and_language, thread_sensitive=True
+            )()
             if lead is None:
                 logger.info(
                     "send_lead_summary: no Lead found for room=%s, skipping", room_name
@@ -1623,14 +1751,18 @@ async def _send_lead_summary_async(room_name: str) -> None:
                 return
 
             try:
-                await send_lead_summary(lead.whatsapp_number, lead, channel="sms")
+                await send_lead_summary(
+                    lead.whatsapp_number, lead, channel="sms", language=call_language
+                )
             except Exception:
                 logger.exception(
                     "send_lead_summary SMS FAILED room=%s lead_id=%s", room_name, lead.pk
                 )
 
             try:
-                await send_lead_summary(lead.whatsapp_number, lead, channel="whatsapp")
+                await send_lead_summary(
+                    lead.whatsapp_number, lead, channel="whatsapp", language=call_language
+                )
             except Exception:
                 logger.exception(
                     "send_lead_summary WHATSAPP FAILED room=%s lead_id=%s", room_name, lead.pk

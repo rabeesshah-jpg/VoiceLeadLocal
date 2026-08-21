@@ -19,8 +19,9 @@ from agent.prompts import CALENDLY_LINK
 
 logger = logging.getLogger("agent.lead_summary")
 
-# Fields on the Lead model to include, in display order.
-_FIELD_LABELS: tuple[tuple[str, str], ...] = (
+# Fields on the Lead model to include, in display order — English and
+# Arabic labels kept in the same order so the two versions line up.
+_FIELD_LABELS_EN: tuple[tuple[str, str], ...] = (
     ("name", "Name"),
     ("company", "Company"),
     ("city", "City"),
@@ -29,24 +30,52 @@ _FIELD_LABELS: tuple[tuple[str, str], ...] = (
     ("start_timeline", "Timeline"),
 )
 
+_FIELD_LABELS_AR: tuple[tuple[str, str], ...] = (
+    ("name", "الاسم"),
+    ("company", "الشركة"),
+    ("city", "المدينة"),
+    ("need", "الاحتياج"),
+    ("business_description", "النشاط التجاري"),
+    ("start_timeline", "الجدول الزمني"),
+)
+
 
 def _env(name: str, default: str = "") -> str:
     return (os.environ.get(name) or default).strip()
 
 
-def build_summary_message(lead) -> str:
-    """Build the summary text from a Lead model instance."""
-    greeting_name = lead.name or "there"
-    lines = [
-        f"Hi {greeting_name}, thanks for calling Good Websites! Here's a quick summary:",
-        "",
-    ]
-    for field, label in _FIELD_LABELS:
+def build_summary_message(lead, *, language: str = "en") -> str:
+    """Build the summary text from a Lead model instance, in whichever
+    language the call was actually conducted in (tracked on
+    CallSession.language, including any mid-call DTMF switch to Arabic).
+    """
+    is_arabic = (language or "en").strip().lower() == "ar"
+    field_labels = _FIELD_LABELS_AR if is_arabic else _FIELD_LABELS_EN
+
+    if is_arabic:
+        greeting_name = lead.name or "عميلنا"
+        lines = [
+            f"مرحباً {greeting_name}، شكراً لتواصلك مع Good Websites! إليك ملخص سريع:",
+            "",
+        ]
+    else:
+        greeting_name = lead.name or "there"
+        lines = [
+            f"Hi {greeting_name}, thanks for calling Good Websites! Here's a quick summary:",
+            "",
+        ]
+
+    for field, label in field_labels:
         value = getattr(lead, field, None)
         if value:
             lines.append(f"{label}: {value}")
+
     lines.append("")
-    lines.append(f"Book a time that works for you: {CALENDLY_LINK}")
+    if is_arabic:
+        lines.append(f"احجز الوقت المناسب لك: {CALENDLY_LINK}")
+    else:
+        lines.append(f"Book a time that works for you: {CALENDLY_LINK}")
+
     return "\n".join(lines)
 
 
@@ -106,8 +135,9 @@ def _send_whatsapp_template(to_number: str, content_sid: str, content_variables:
 
 
 @sync_to_async
-def send_lead_summary(to_number: str, lead, *, channel: str = "sms") -> str:
-    """Send the lead summary. Returns the Twilio message SID.
+def send_lead_summary(to_number: str, lead, *, channel: str = "sms", language: str = "en") -> str:
+    """Send the lead summary, in whichever language the call was actually
+    conducted in. Returns the Twilio message SID.
 
     channel: "sms" (default, works immediately, no approval needed) or
     "whatsapp" (requires an approved template for business-initiated
@@ -116,7 +146,7 @@ def send_lead_summary(to_number: str, lead, *, channel: str = "sms") -> str:
     Call with `await` from async code. Raises on failure — callers should
     catch and log rather than letting this break call-end handling.
     """
-    body = build_summary_message(lead)
+    body = build_summary_message(lead, language=language)
     if channel == "sms":
         sid = _send_sms(to_number, body)
     elif channel == "whatsapp":
@@ -124,7 +154,7 @@ def send_lead_summary(to_number: str, lead, *, channel: str = "sms") -> str:
     else:
         raise ValueError(f"Unknown channel: {channel!r}")
     logger.info(
-        "lead_summary sent channel=%s to=%s sid=%s chars=%s",
-        channel, to_number, sid, len(body),
+        "lead_summary sent channel=%s language=%s to=%s sid=%s chars=%s",
+        channel, language, to_number, sid, len(body),
     )
     return sid
