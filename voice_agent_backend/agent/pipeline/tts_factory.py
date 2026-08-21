@@ -53,13 +53,19 @@ def build_tts(
         # for voice selection on purpose — always use a real Cartesia voice
         # UUID from env, chosen by language. Arabic calls use the Fatima
         # voice (CARTESIA_VOICE_ID_AR); everything else uses the default
-        # English voice (CARTESIA_VOICE_ID).
+        # English voice. Reads CARTESIA_VOICE_ID_EN first (matches the
+        # env naming convention actually in use), falling back to the
+        # older CARTESIA_VOICE_ID name for backward compatibility.
         if language == "ar":
             voice = os.environ.get("CARTESIA_VOICE_ID_AR") or os.environ.get(
                 "CARTESIA_VOICE_ID", "<voice_id>"
             )
         else:
-            voice = os.environ.get("CARTESIA_VOICE_ID", "<voice_id>")
+            voice = (
+                os.environ.get("CARTESIA_VOICE_ID_EN")
+                or os.environ.get("CARTESIA_VOICE_ID")
+                or "<voice_id>"
+            )
 
         # sonic-2's specific language list does not include Arabic;
         # Arabic support requires sonic-3 (or newer). Only use sonic-3 for
