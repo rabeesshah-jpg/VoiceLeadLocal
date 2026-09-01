@@ -354,6 +354,16 @@ async def entrypoint(ctx: JobContext):
         latency_holder[0].mark_llm_first_token()
         pipeline_holder[0].mark_llm_first_token()
 
+    # def _on_llm_metrics_collected(metrics: object) -> None:
+    #     from livekit.agents.metrics import LLMMetrics
+
+    #     if isinstance(metrics, LLMMetrics):
+    #         pipeline_holder[0].record_llm_usage(
+    #             prompt_tokens=metrics.prompt_tokens,
+    #             completion_tokens=metrics.completion_tokens,
+    #             total_tokens=metrics.total_tokens,
+    #         )
+
     def _on_llm_metrics_collected(metrics: object) -> None:
         from livekit.agents.metrics import LLMMetrics
 
@@ -362,6 +372,27 @@ async def entrypoint(ctx: JobContext):
                 prompt_tokens=metrics.prompt_tokens,
                 completion_tokens=metrics.completion_tokens,
                 total_tokens=metrics.total_tokens,
+            )
+            # Per-request LLM diagnostic: exactly what went into this
+            # request, what came back, and how long it took — printed for
+            # EVERY single LLM call in the conversation, so growing
+            # prompt_tokens across turns (the conversation history getting
+            # longer) can be directly compared against ttft/duration to
+            # confirm or rule out context growth as the cause of latency
+            # increasing partway through a call.
+            log_block(
+                logger,
+                logging.INFO,
+                operation="LLM_REQUEST_DETAIL",
+                step="metrics_collected",
+                status="OK",
+                room=room_name,
+                turn_seq=pipeline_holder[0].turn_seq,
+                prompt_tokens=metrics.prompt_tokens,
+                completion_tokens=metrics.completion_tokens,
+                total_tokens=metrics.total_tokens,
+                ttft_s=round(getattr(metrics, "ttft", 0.0), 3),
+                duration_s=round(getattr(metrics, "duration", 0.0), 3),
             )
 
     def _publish_llm_start_milestone() -> None:

@@ -1,4 +1,4 @@
-"""OpenRouter LLM via OpenAI-compatible LiveKit plugin."""
+"""Direct OpenAI LLM via the LiveKit openai plugin (no OpenRouter)."""
 
 from __future__ import annotations
 
@@ -15,35 +15,25 @@ def get_voice_agent_instructions(language: str = "en") -> str:
 
 
 def build_openrouter_llm() -> openai.LLM:
-    # openai/gpt-4o-mini is served by only two real providers on OpenRouter:
-    # OpenAI's own direct endpoint and Azure. Benchmarked time-to-first-token
-    # (Artificial Analysis, checked Aug 2026): OpenAI 1.04s, Azure 1.70s —
-    # a clear, consistent gap. Rather than relying only on OpenRouter's
-    # per-request latency-sort (which still occasionally routes to Azure or
-    # has an off moment), explicitly order OpenAI first. allow_fallbacks
-    # stays true so Azure is still used if OpenAI is genuinely down —
-    # this only changes which provider is *preferred*, not availability.
-    extra_body: dict = {}
-    provider_pref: dict = {}
-    if os.environ.get("VOICE_AGENT_OPENROUTER_PREFER_OPENAI", "true").lower() in (
-        "1", "true", "yes",
-    ):
-        provider_pref["order"] = ["openai"]
-        provider_pref["allow_fallbacks"] = True
-    elif os.environ.get("VOICE_AGENT_OPENROUTER_SORT_LATENCY", "true").lower() in (
-        "1", "true", "yes",
-    ):
-        provider_pref["sort"] = "latency"
-    if provider_pref:
-        extra_body["provider"] = provider_pref
-
+    # Direct OpenAI (no OpenRouter) — isolates whether OpenRouter's own
+    # measured ~0.55-0.7s "Routing Overhead" (confirmed on their own
+    # Activity dashboard) is actually removable by going direct, or an
+    # unavoidable property of the model/generation itself.
+    #
+    # gpt-4.1-nano: a genuine lightweight, non-reasoning model (NOT
+    # gpt-5-nano, which is a reasoning model and would likely be slower
+    # despite the name).
+    #
+    # NOTE: function name kept as build_openrouter_llm() to avoid touching
+    # the import in entrypoint.py — this builds a direct OpenAI client.
+    #
+    # NOTE: model string has NO "openai/" prefix here — that prefix is an
+    # OpenRouter-only convention for identifying provider+model. Direct
+    # OpenAI's own API uses the bare model name.
     return openai.LLM(
-        model=os.environ.get("VOICE_AGENT_LLM_MODEL", "openai/gpt-4o-mini"),
-        api_key=os.environ.get("OPENROUTER_API_KEY"),
-        base_url=(os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")).rstrip(
-            "/"
-        ),
+        model=os.environ.get("VOICE_AGENT_LLM_MODEL", "gpt-4.1-nano"),
+        api_key=os.environ.get("OPENAI_API_KEY"),
         temperature=0.7,
-        max_completion_tokens=256,
-        extra_body=extra_body or None,
+        max_completion_tokens=120,
+        parallel_tool_calls=True,
     )

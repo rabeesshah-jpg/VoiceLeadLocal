@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import AsyncIterable, Callable
@@ -87,6 +88,14 @@ class VoiceAgent(Agent):
         self._on_end_call = on_end_call
         self._greeting_complete = greeting_complete
         self._room = room
+        # Tracks in-flight fire-and-forget save_lead_info database writes.
+        # Holding a strong reference here prevents asyncio from garbage
+        # collecting the task before it completes (a well-known asyncio
+        # gotcha with create_task() when nothing else references the
+        # task) — not used to block or await anything; the post-call
+        # transcript extraction backstop is the real safety net if a call
+        # ends before a write finishes.
+        self._pending_save_tasks: set[asyncio.Task] = set()
         policy = PartialSttPreemptivePolicy.from_env()
         if is_faster_whisper_provider():
             policy.enabled = False
@@ -144,8 +153,17 @@ class VoiceAgent(Agent):
             "save_lead_info CALLED room=%s name=%s company=%s city=%s",
             self._room, name, company, city,
         )
-        try:
-            await self._save_lead_fields(
+        # Fire-and-forget: the database write no longer blocks the LLM's
+        # tool-calling round-trip. The write still happens reliably in the
+        # background (tracked in self._pending_save_tasks so it can't be
+        # garbage-collected mid-write) — and even in the rare case a task
+        # doesn't finish before the call ends, the post-call transcript
+        # extraction backstop (agent.pipeline.lead_extraction, wired in
+        # entrypoint.py's _extract_and_fill_lead_async) independently
+        # reconstructs and fills in lead fields from the full conversation
+        # after disconnect, so no data is lost either way.
+        task = asyncio.create_task(
+            self._save_lead_fields_background(
                 name=name,
                 company=company,
                 whatsapp_number=whatsapp_number,
@@ -158,10 +176,18 @@ class VoiceAgent(Agent):
                 lead_intent=lead_intent,
                 appointment_time=appointment_time,
             )
-        except Exception:
-            logger.exception("save_lead_info FAILED room=%s", self._room)
-            raise
+        )
+        self._pending_save_tasks.add(task)
+        task.add_done_callback(self._pending_save_tasks.discard)
         return "Lead info saved."
+
+    async def _save_lead_fields_background(self, **fields) -> None:
+        try:
+            await self._save_lead_fields(**fields)
+        except Exception:
+            logger.exception(
+                "save_lead_info background save FAILED room=%s", self._room
+            )
 
     @sync_to_async
     def _save_lead_fields(self, **fields) -> None:
@@ -188,19 +214,44 @@ class VoiceAgent(Agent):
 
     @function_tool()
     async def end_call(self) -> str:
-        """Call this exactly once, immediately after you have finished speaking
-        your closing line (e.g. after telling the caller you'll send the
-        summary and Calendly link, and saying goodbye).
+        """Call this once you are ready to end the call — once you have
+        either captured what you need, or the caller has made clear
+        they're done / not interested.
 
-        Do NOT call this before your goodbye message — call it right after,
-        as your very last action in the conversation. The call will
-        disconnect automatically once your goodbye has finished playing; you
-        do not need to say anything further after calling this tool.
+        Do NOT say your own goodbye or closing line first — calling this
+        tool automatically speaks a closing message (mentioning next steps
+        and saying goodbye) and ends the call for you. Just call it
+        directly once you're ready to wrap up; you do not need to say
+        anything else before or after calling it.
         """
         logger.info("end_call CALLED room=%s", self._room)
+        closing_text = (
+            "شكراً جزيلاً على وقتك! راقب رسائلك للخطوات القادمة. يوم سعيد! مع السلامة!"
+            if self._language == "ar"
+            else "Thanks so much for your time! Keep an eye on your messages for "
+            "next steps. Have a great day! Goodbye!"
+        )
+        publisher = self._publisher
+        try:
+            if publisher:
+                await publisher.agent_state("speaking")
+                await publisher.llm_response(closing_text, is_final=False)
+            handle = self.session.say(
+                closing_text,
+                allow_interruptions=True,
+                add_to_chat_ctx=True,
+            )
+            await handle.wait_for_playout()
+            if publisher:
+                await publisher.llm_response(closing_text, is_final=True)
+                await publisher.llm_playback_end(interrupted=handle.interrupted)
+        except Exception:
+            logger.exception(
+                "end_call: closing message failed to play, room=%s", self._room
+            )
         if self._on_end_call:
             self._on_end_call()
-        return "Call will end automatically once this message finishes playing."
+        return "Goodbye message already delivered; call will now end."
 
     def llm_node(self, chat_ctx, tools, model_settings: ModelSettings):
         return self._llm_node_with_guardrails(chat_ctx, tools, model_settings)
@@ -284,8 +335,6 @@ class VoiceAgent(Agent):
     async def _transcription_node_stream(
         self, text: AsyncIterable[str | TimedString], model_settings: ModelSettings
     ):
-        import asyncio
-
         parts: list[str] = []
         async for delta in Agent.default.transcription_node(self, text, model_settings):
             chunk = _text_chunk(delta)
