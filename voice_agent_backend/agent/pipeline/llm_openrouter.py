@@ -33,7 +33,7 @@ def build_openrouter_llm() -> openai.LLM:
     return openai.LLM(
         model=os.environ.get("VOICE_AGENT_LLM_MODEL", "gpt-4.1-nano"),
         api_key=os.environ.get("OPENAI_API_KEY"),
-        temperature=0.7,
+        temperature=0.3,
         max_completion_tokens=120,
         parallel_tool_calls=True,
     )

@@ -1,12 +1,17 @@
-"""Deterministic post-call lead extraction — a backstop for save_lead_info's
+"""Deterministic post-call lead extraction, a backstop for save_lead_info's
 live tool-calling reliability, which testing has shown fails intermittently
 even under the best-known pipeline settings.
 
 Runs once, after the call ends, using the full conversation transcript
 (accumulated live during the call, not re-parsed from log files). Only
 fills fields that are still empty on the Lead row, so it never overwrites
-anything save_lead_info already correctly captured live during the call —
-this is purely a safety net for whatever save_lead_info missed.
+anything save_lead_info already correctly captured live during the call.
+This is purely a safety net for whatever save_lead_info missed.
+
+Provider resolution: prefers direct OpenAI (OPENAI_API_KEY), falls back to
+OpenRouter (OPENROUTER_API_KEY) if that is what is configured. The model
+name is normalised for whichever one is in use, since OpenRouter requires
+a "openai/" provider prefix and the direct OpenAI API rejects it.
 """
 
 from __future__ import annotations
@@ -32,7 +37,10 @@ FIELDS: tuple[str, ...] = (
     "lead_intent",
 )
 
-_SYSTEM_PROMPT = """You extract structured lead information from a phone/voice call transcript between "NORA" (a sales qualifying assistant for a website agency called Good Websites) and "USER" (the caller).
+_OPENAI_BASE = "https://api.openai.com/v1"
+_OPENROUTER_BASE = "https://openrouter.ai/api/v1"
+
+_SYSTEM_PROMPT = """You extract structured lead information from a phone/voice call transcript between "NOURA" (a sales qualifying assistant for a website agency called Good Websites) and "USER" (the caller).
 
 Return ONLY a JSON object with these fields, using null for anything not mentioned or unclear:
 - name: caller's name
@@ -44,26 +52,58 @@ Return ONLY a JSON object with these fields, using null for anything not mention
 - website_action: "upgrade", "new", or null
 - business_description: what the caller's business does
 - start_timeline: when they want to start
-- lead_intent: "strong fit", "moderate", or "weak" based on their interest level shown in the transcript
+- lead_intent: "strong fit", "moderate", or "weak" based on their interest level shown in the transcript. Strong fit means they asked about a quote, pricing or a consultation, described a real project, shared contact details, or want to start soon. Moderate means they are exploring services but not ready to book. Weak means vague curiosity with very little detail.
 
-Only use information actually stated in the transcript. Do not guess, invent, or infer values that weren't said. Return raw JSON only — no markdown code fences, no explanation, just the JSON object."""
+Only use information actually stated in the transcript. Do not guess, invent, or infer values that weren't said. Return raw JSON only, no markdown code fences, no explanation, just the JSON object."""
+
+
+def _resolve_provider() -> tuple[str, str, str] | None:
+    """Return (api_key, base_url, model) for whichever provider is
+    configured, or None if neither is. Prefers direct OpenAI.
+    """
+    model = (os.environ.get("VOICE_AGENT_LLM_MODEL") or "gpt-4o-mini").strip()
+
+    openai_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if openai_key:
+        base = (os.environ.get("OPENAI_BASE_URL") or _OPENAI_BASE).rstrip("/")
+        # Direct OpenAI rejects the OpenRouter-style provider prefix.
+        if model.startswith("openai/"):
+            model = model.split("/", 1)[1]
+        return openai_key, base, model
+
+    router_key = (os.environ.get("OPENROUTER_API_KEY") or "").strip()
+    if router_key:
+        base = (os.environ.get("OPENROUTER_BASE_URL") or _OPENROUTER_BASE).rstrip("/")
+        # OpenRouter requires the provider prefix.
+        if "/" not in model:
+            model = f"openai/{model}"
+        return router_key, base, model
+
+    return None
 
 
 def extract_lead_fields(transcript: str) -> dict:
     """Call the LLM once with the full transcript and return extracted
     fields as a dict (only keys with real, non-empty values are included).
 
-    Never raises — returns {} on any failure. This is a best-effort
-    backstop and must never break call shutdown.
+    Never raises, returns {} on any failure. This is a best-effort
+    backstop and must never break call shutdown. Unlike the previous
+    version, every no-op path now logs a reason, so a misconfigured key
+    cannot silently disable extraction.
     """
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    base_url = (
-        os.environ.get("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1"
-    ).rstrip("/")
-    model = os.environ.get("VOICE_AGENT_LLM_MODEL", "openai/gpt-4o-mini")
-
-    if not api_key or not transcript.strip():
+    if not transcript.strip():
+        logger.warning("lead_extraction: empty transcript, skipping")
         return {}
+
+    provider = _resolve_provider()
+    if provider is None:
+        logger.error(
+            "lead_extraction: no API key configured "
+            "(set OPENAI_API_KEY or OPENROUTER_API_KEY), extraction disabled"
+        )
+        return {}
+
+    api_key, base_url, model = provider
 
     payload = {
         "model": model,
@@ -93,9 +133,14 @@ def extract_lead_fields(transcript: str) -> dict:
             if content.lower().startswith("json"):
                 content = content[4:]
         data = json.loads(content)
-        return {
+        extracted = {
             k: v for k, v in data.items() if k in FIELDS and v not in (None, "")
         }
+        logger.info(
+            "lead_extraction: extracted %s field(s) model=%s fields=%s",
+            len(extracted), model, sorted(extracted),
+        )
+        return extracted
     except Exception:
-        logger.exception("lead_extraction: extraction call failed")
+        logger.exception("lead_extraction: extraction call failed model=%s", model)
         return {}
