@@ -143,11 +143,12 @@ class VoiceAgent(Agent):
         lead_intent: str | None = None,
         appointment_time: str | None = None,
     ) -> str:
-        """Save or update structured lead details as they are gathered during the call.
-
-        Call this whenever the caller provides new information — you do not need
-        to have every field before calling; call it again later with additional
-        fields as the conversation progresses. Only pass fields you actually have.
+        """Save the lead's details. Called up to twice per conversation: an
+        early checkpoint with name/company/city, and a final save with
+        everything else. Always pass every parameter listed in this
+        function's signature on every call. Use null for any field you do
+        not have yet — never omit a parameter entirely, omitting a
+        parameter will cause the call to fail schema validation.
         """
         logger.info(
             "save_lead_info CALLED room=%s name=%s company=%s city=%s",

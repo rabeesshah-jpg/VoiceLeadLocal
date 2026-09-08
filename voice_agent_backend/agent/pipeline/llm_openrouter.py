@@ -1,8 +1,53 @@
+"""LLM client via the LiveKit openai plugin, pointed at whichever
+OpenAI-compatible provider is selected in .env.
+
+Provider is chosen via VOICE_AGENT_LLM_PROVIDER (openai / groq / cerebras,
+defaults to openai). Each provider reads its own API key from its own env
+var, so switching providers is a two-line .env change with no code edit:
+
+    VOICE_AGENT_LLM_PROVIDER=groq
+    VOICE_AGENT_LLM_MODEL=qwen/qwen3.8-27b
+
+    VOICE_AGENT_LLM_PROVIDER=cerebras
+    VOICE_AGENT_LLM_MODEL=gpt-oss-120b
+
+    VOICE_AGENT_LLM_PROVIDER=openai   (or unset)
+    VOICE_AGENT_LLM_MODEL=gpt-4.1-nano
+
+NOTE: function name kept as build_openrouter_llm() to avoid touching the
+import in entrypoint.py — despite the name, this builds a plain OpenAI-
+compatible client for whichever provider is configured, not OpenRouter.
+
+NOTE: model strings are provider-specific. OpenAI and Cerebras use the
+bare model name (e.g. "gpt-4.1-nano", "gpt-oss-120b"). Groq's own hosted
+OpenAI/Qwen models use a provider-prefixed id (e.g. "openai/gpt-oss-20b",
+"qwen/qwen3.8-27b") — that prefix is Groq's own catalog convention,
+unrelated to OpenRouter's.
+
+reasoning_effort: several Groq-hosted models (the gpt-oss family and the
+qwen3 family) are reasoning models that reject requests with no explicit
+reasoning_effort, or with a value outside what that specific model
+supports — each model has a DIFFERENT allowed set, so this has to be
+looked up per model, not per provider:
+    - openai/gpt-oss-20b, openai/gpt-oss-120b: low / medium / high only
+      (no "none" — sending "none" 400s)
+    - qwen/qwen3.6-27b: none / default / null only
+      (no low/medium/high — sending those 400s)
+    - qwen/qwen3.8-27b: none / default / low / medium / high
+Leaving reasoning_effort unset does not reliably fall back to a safe
+value across these models (confirmed by a live 400 from qwen3.6-27b with
+nothing explicitly set), so we always send an explicit value for any
+model in the table below. Models not in the table (e.g. plain OpenAI,
+Cerebras's non-reasoning models) never get this kwarg at all.
+"""
+
 from __future__ import annotations
+
 import os
+
 from livekit.plugins import openai
+
 from agent.prompts import get_voice_agent_instructions as build_voice_agent_instructions
-from agent.pipeline.llm_http_pool import get_shared_openai_client
 
 
 def get_voice_agent_instructions(language: str = "en") -> str:
@@ -22,7 +67,14 @@ _PROVIDER_CONFIG: dict[str, dict[str, str | None]] = {
     "groq": {
         "base_url": "https://api.groq.com/openai/v1",
         "key_env": "GROQ_API_KEY",
-        "default_model": "openai/gpt-oss-20b",
+        # qwen3.8-27b over qwen3.6-27b as the default: 3.8 tolerates a
+        # wider range of reasoning_effort values, and the gpt-oss family
+        # is avoided as a default entirely — it uses OpenAI's Harmony
+        # tool-call format, which has a documented, currently-open bug
+        # where special formatting tokens (e.g. "<|channel|>commentary")
+        # intermittently leak into the tool name string on Groq's serving
+        # stack, corrupting tool calls unpredictably mid-conversation.
+        "default_model": "qwen/qwen3.8-27b",
     },
     "cerebras": {
         "base_url": "https://api.cerebras.ai/v1",
@@ -31,12 +83,20 @@ _PROVIDER_CONFIG: dict[str, dict[str, str | None]] = {
     },
 }
 
-# gpt-oss models (used by Groq and Cerebras above) are reasoning models.
-# Without capping reasoning effort, they can spend the entire
-# max_completion_tokens budget on invisible reasoning tokens and emit zero
-# actual answer text — item.text_content ends up "" and the turn is
-# silently dropped downstream (no TTS, agent just goes back to listening).
-_REASONING_PROVIDERS = {"groq", "cerebras"}
+# Per-model, not per-provider — each reasoning model on Groq has a
+# different allowed set of values, see module docstring.
+_GROQ_REASONING_EFFORT: dict[str, str] = {
+    "openai/gpt-oss-20b": "low",
+    "openai/gpt-oss-120b": "low",
+    "qwen/qwen3.6-27b": "none",
+    "qwen/qwen3.8-27b": "none",
+}
+
+
+def _reasoning_effort_for(provider: str, model: str) -> str | None:
+    if provider != "groq":
+        return None
+    return _GROQ_REASONING_EFFORT.get(model)
 
 
 def build_openrouter_llm() -> openai.LLM:
@@ -57,30 +117,19 @@ def build_openrouter_llm() -> openai.LLM:
         )
 
     model = os.environ.get("VOICE_AGENT_LLM_MODEL") or cfg["default_model"]
-    base_url = cfg["base_url"]
-
-    # Reuse a process-wide pooled AsyncOpenAI client instead of letting the
-    # plugin build its own per-session client with the SDK's default 5s
-    # httpx keepalive_expiry. That default was causing a fresh TCP+TLS
-    # handshake (~350-400ms, confirmed via curl) on turns separated by
-    # normal conversational pauses. This client is keyed by (api_key,
-    # base_url) and shared across calls/turns for this worker process.
-    shared_client = get_shared_openai_client(api_key=api_key, base_url=base_url)
 
     kwargs = dict(
         model=model,
-        client=shared_client,
+        api_key=api_key,
         temperature=0.3,
         max_completion_tokens=120,
         parallel_tool_calls=True,
     )
+    if cfg["base_url"]:
+        kwargs["base_url"] = cfg["base_url"]
 
-    if provider in _REASONING_PROVIDERS:
-        # Keep reasoning minimal for real-time voice — we want a fast
-        # spoken answer, not deliberation — and give enough token headroom
-        # for reasoning + the actual answer so the answer doesn't get
-        # truncated to empty.
-        kwargs["reasoning_effort"] = "low"
-        kwargs["max_completion_tokens"] = 300
+    reasoning_effort = _reasoning_effort_for(provider, model)
+    if reasoning_effort is not None:
+        kwargs["reasoning_effort"] = reasoning_effort
 
     return openai.LLM(**kwargs)

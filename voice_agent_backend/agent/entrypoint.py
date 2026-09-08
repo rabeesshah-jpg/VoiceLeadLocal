@@ -16,6 +16,19 @@ import re
 import sys
 import uuid
 from pathlib import Path
+import socket
+
+# Force IPv4-only DNS resolution for this process. Groq's API (and other
+# hosts) resolve to both IPv4 and IPv6 addresses; on networks where IPv6
+# routing is broken (no route to the resolved IPv6 address), httpx/anyio
+# can fail with APIConnectionError when it picks the IPv6 address first.
+# This must run before any networking library (openai, httpx, livekit
+# plugins, django, etc.) is imported below, since it patches the stdlib
+# resolver that those libraries call into.
+_orig_getaddrinfo = socket.getaddrinfo
+def _ipv4_only_getaddrinfo(host, *args, **kwargs):
+    return [r for r in _orig_getaddrinfo(host, *args, **kwargs) if r[0] == socket.AF_INET]
+socket.getaddrinfo = _ipv4_only_getaddrinfo
 
 _BACKEND_ROOT = Path(__file__).resolve().parent.parent
 if str(_BACKEND_ROOT) not in sys.path:
@@ -354,16 +367,6 @@ async def entrypoint(ctx: JobContext):
         latency_holder[0].mark_llm_first_token()
         pipeline_holder[0].mark_llm_first_token()
 
-    # def _on_llm_metrics_collected(metrics: object) -> None:
-    #     from livekit.agents.metrics import LLMMetrics
-
-    #     if isinstance(metrics, LLMMetrics):
-    #         pipeline_holder[0].record_llm_usage(
-    #             prompt_tokens=metrics.prompt_tokens,
-    #             completion_tokens=metrics.completion_tokens,
-    #             total_tokens=metrics.total_tokens,
-    #         )
-
     def _on_llm_metrics_collected(metrics: object) -> None:
         from livekit.agents.metrics import LLMMetrics
 
@@ -572,11 +575,56 @@ async def entrypoint(ctx: JobContext):
                 logger.warning("TTS HTTP warmup in job failed: %s", result)
             return result
 
+    async def _warmup_llm() -> dict:
+        """Fire one throwaway request through the shared OpenAI client as
+        soon as the call session is assembled, in parallel with waiting for
+        the caller and the STT/TTS warmups below.
+
+        Without this, the LLM client's very first network request of every
+        call was the real conversational turn — meaning any cold-start
+        connection hiccup (dead pooled connection, one-off handshake
+        jitter) surfaced as an audible "having trouble" apology to the
+        caller. STT and TTS already get this treatment via warmup_stt() /
+        warmup_tts_connection(); the LLM never did. This closes that gap by
+        reusing the exact same shared client build_openrouter_llm() uses
+        (see llm_http_pool.get_shared_openai_client), so the connection
+        this warms is the same one the real turn will reuse — not a
+        separate one.
+
+        Deliberately never raises: a warmup failure just means the real
+        first turn takes the cold-start hit it always used to, which is
+        the pre-fix behavior, not a new failure mode.
+        """
+        from agent.pipeline.llm_http_pool import get_shared_openai_client
+        from agent.pipeline.llm_openrouter import _PROVIDER_CONFIG
+
+        provider = (os.environ.get("VOICE_AGENT_LLM_PROVIDER") or "openai").strip().lower()
+        cfg = _PROVIDER_CONFIG.get(provider, _PROVIDER_CONFIG["openai"])
+        api_key = os.environ.get(cfg["key_env"])
+        if not api_key:
+            return {"ok": False, "skipped": True, "reason": "no_api_key"}
+
+        model = os.environ.get("VOICE_AGENT_LLM_MODEL") or cfg["default_model"]
+        client = get_shared_openai_client(api_key=api_key, base_url=cfg["base_url"])
+
+        with StepTimer(logger, operation, "llm_warmup", room=room_name, model=model):
+            try:
+                await client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": "hi"}],
+                    max_completion_tokens=1,
+                )
+                return {"ok": True}
+            except Exception as exc:
+                logger.warning("LLM warmup failed room=%s: %s", room_name, exc)
+                return {"ok": False, "error": str(exc)}
+
     with StepTimer(logger, operation, "wait_for_caller", room=room_name):
-        participant, _warmup_tts_res, _warmup_stt_res = await asyncio.gather(
+        participant, _warmup_tts_res, _warmup_stt_res, _warmup_llm_res = await asyncio.gather(
             ctx.wait_for_participant(),
             _warmup_tts(),
             _warmup_stt_job(),
+            _warmup_llm(),
         )
     log_block(
         logger,
@@ -1519,6 +1567,19 @@ async def entrypoint(ctx: JobContext):
                 code = "tts_failed"
             elif "llm" in err_type:
                 code = "llm_failed"
+
+            # <<< REPLACE FROM HERE >>>
+            # `err` here is LiveKit's ErrorEvent wrapper (fields: type, timestamp,
+            # label, error, recoverable) — the actual raised exception is nested
+            # inside it as `err.error`, not `err` itself.
+            actual_exc = getattr(err, "error", None) or err
+            cause = getattr(actual_exc, "__cause__", None) or getattr(actual_exc, "__context__", None)
+
+            import traceback
+            tb_str = "".join(
+                traceback.format_exception(type(actual_exc), actual_exc, actual_exc.__traceback__)
+            )[-2000:]
+            
             log_block(
                 logger,
                 logging.ERROR,
@@ -1527,15 +1588,20 @@ async def entrypoint(ctx: JobContext):
                 status="FAIL",
                 room=room_name,
                 error=str(err)[:400],
+                cause_type=type(cause).__name__ if cause else None,
+                cause_detail=str(cause)[:400] if cause else None,
+                traceback=tb_str,
             )
+        # <<< REPLACE TO HERE >>>
+
             await publisher.error(code, str(err))
             await log_call_event(room_name, "error", {"code": code, "message": str(err)[:300]})
             try:
                 with StepTimer(logger, operation, "fallback_tts_apology", room=room_name):
                     apology = (
-                        FALLBACK_APOLOGY_AR
-                        if language == "ar"
-                        else FALLBACK_APOLOGY_EN
+                      FALLBACK_APOLOGY_AR
+                      if language == "ar"
+                      else FALLBACK_APOLOGY_EN
                     )
                     await agent_session.say(apology, allow_interruptions=True)
             except Exception as say_exc:

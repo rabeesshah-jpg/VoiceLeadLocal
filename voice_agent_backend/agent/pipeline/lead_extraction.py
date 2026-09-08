@@ -8,10 +8,17 @@ fills fields that are still empty on the Lead row, so it never overwrites
 anything save_lead_info already correctly captured live during the call.
 This is purely a safety net for whatever save_lead_info missed.
 
-Provider resolution: prefers direct OpenAI (OPENAI_API_KEY), falls back to
-OpenRouter (OPENROUTER_API_KEY) if that is what is configured. The model
-name is normalised for whichever one is in use, since OpenRouter requires
-a "openai/" provider prefix and the direct OpenAI API rejects it.
+Provider resolution: prefers direct OpenAI (OPENAI_API_KEY), then
+OpenRouter (OPENROUTER_API_KEY), then Groq (GROQ_API_KEY) as a last
+resort. Groq was added after a real incident: the live call's LLM
+provider had been switched to Groq, OPENAI_API_KEY was unset (billing
+exhausted) and OPENROUTER_API_KEY was never configured, so this backstop
+had silently returned {} on every call for an unknown period — the one
+call where save_lead_info also failed lost its lead entirely, with
+nothing to recover it, because the safety net itself had no working key.
+Every early-return path below now logs a clear reason so this can't
+happen silently again; check for "extraction disabled" in the logs
+whenever changing which LLM provider the live call uses.
 """
 
 from __future__ import annotations
@@ -39,6 +46,24 @@ FIELDS: tuple[str, ...] = (
 
 _OPENAI_BASE = "https://api.openai.com/v1"
 _OPENROUTER_BASE = "https://openrouter.ai/api/v1"
+_GROQ_BASE = "https://api.groq.com/openai/v1"
+
+# Groq's reasoning models each accept a DIFFERENT set of reasoning_effort
+# values — sending the wrong one is a hard 400, not a soft fallback (this
+# is what broke the live call this backstop is meant to catch). Kept in
+# sync with the equivalent table in agent/pipeline/llm_openrouter.py.
+_GROQ_REASONING_EFFORT: dict[str, str] = {
+    "openai/gpt-oss-20b": "low",
+    "openai/gpt-oss-120b": "low",
+    "qwen/qwen3.6-27b": "none",
+    "qwen/qwen3.8-27b": "none",
+}
+# Extraction here is a plain JSON completion, no tool/function calling, so
+# it isn't exposed to the gpt-oss Harmony tool-name leak bug — but we still
+# default to qwen3.8-27b for consistency with the live pipeline's proven
+# choice, and because it tolerates a wider reasoning_effort range than
+# qwen3.6 if VOICE_AGENT_LLM_MODEL points at something Groq-specific.
+_GROQ_DEFAULT_MODEL = "qwen/qwen3.8-27b"
 
 _SYSTEM_PROMPT = """You extract structured lead information from a phone/voice call transcript between "NOURA" (a sales qualifying assistant for a website agency called Good Websites) and "USER" (the caller).
 
@@ -57,27 +82,38 @@ Return ONLY a JSON object with these fields, using null for anything not mention
 Only use information actually stated in the transcript. Do not guess, invent, or infer values that weren't said. Return raw JSON only, no markdown code fences, no explanation, just the JSON object."""
 
 
-def _resolve_provider() -> tuple[str, str, str] | None:
-    """Return (api_key, base_url, model) for whichever provider is
-    configured, or None if neither is. Prefers direct OpenAI.
+def _resolve_provider() -> tuple[str, str, str, str | None] | None:
+    """Return (api_key, base_url, model, reasoning_effort) for whichever
+    provider is configured, or None if none are. Order: OpenAI, then
+    OpenRouter, then Groq.
     """
-    model = (os.environ.get("VOICE_AGENT_LLM_MODEL") or "gpt-4o-mini").strip()
+    model = (os.environ.get("VOICE_AGENT_LLM_MODEL") or "").strip()
 
     openai_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if openai_key:
         base = (os.environ.get("OPENAI_BASE_URL") or _OPENAI_BASE).rstrip("/")
-        # Direct OpenAI rejects the OpenRouter-style provider prefix.
-        if model.startswith("openai/"):
-            model = model.split("/", 1)[1]
-        return openai_key, base, model
+        m = model or "gpt-4.1-nano"
+        if m.startswith("openai/"):
+            m = m.split("/", 1)[1]
+        return openai_key, base, m, None
 
     router_key = (os.environ.get("OPENROUTER_API_KEY") or "").strip()
     if router_key:
         base = (os.environ.get("OPENROUTER_BASE_URL") or _OPENROUTER_BASE).rstrip("/")
-        # OpenRouter requires the provider prefix.
-        if "/" not in model:
-            model = f"openai/{model}"
-        return router_key, base, model
+        m = model or "gpt-4o-mini"
+        if "/" not in m:
+            m = f"openai/{m}"
+        return router_key, base, m, None
+
+    groq_key = (os.environ.get("GROQ_API_KEY") or "").strip()
+    if groq_key:
+        base = (os.environ.get("GROQ_BASE_URL") or _GROQ_BASE).rstrip("/")
+        # Only reuse VOICE_AGENT_LLM_MODEL if it's actually a Groq model id
+        # (contains a "/"), otherwise it's leftover from a different
+        # provider (e.g. "gpt-4.1-nano") and would 404 against Groq.
+        m = model if model and "/" in model else _GROQ_DEFAULT_MODEL
+        reasoning_effort = _GROQ_REASONING_EFFORT.get(m)
+        return groq_key, base, m, reasoning_effort
 
     return None
 
@@ -87,9 +123,9 @@ def extract_lead_fields(transcript: str) -> dict:
     fields as a dict (only keys with real, non-empty values are included).
 
     Never raises, returns {} on any failure. This is a best-effort
-    backstop and must never break call shutdown. Unlike the previous
-    version, every no-op path now logs a reason, so a misconfigured key
-    cannot silently disable extraction.
+    backstop and must never break call shutdown. Every no-op path logs a
+    reason, so a misconfigured or missing key cannot silently disable
+    extraction without leaving a trace in the logs.
     """
     if not transcript.strip():
         logger.warning("lead_extraction: empty transcript, skipping")
@@ -99,11 +135,12 @@ def extract_lead_fields(transcript: str) -> dict:
     if provider is None:
         logger.error(
             "lead_extraction: no API key configured "
-            "(set OPENAI_API_KEY or OPENROUTER_API_KEY), extraction disabled"
+            "(set OPENAI_API_KEY, OPENROUTER_API_KEY, or GROQ_API_KEY), "
+            "extraction disabled"
         )
         return {}
 
-    api_key, base_url, model = provider
+    api_key, base_url, model, reasoning_effort = provider
 
     payload = {
         "model": model,
@@ -114,6 +151,9 @@ def extract_lead_fields(transcript: str) -> dict:
         "temperature": 0,
         "max_completion_tokens": 400,
     }
+    if reasoning_effort is not None:
+        payload["reasoning_effort"] = reasoning_effort
+
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
